@@ -1,4 +1,10 @@
 package com.pricetracker.repository;
 
-public class StoreRepository {
+import com.pricetracker.entity.Store;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface StoreRepository extends JpaRepository<Store, Long> {
+    Optional<Store> findByCode(String code);
 }
