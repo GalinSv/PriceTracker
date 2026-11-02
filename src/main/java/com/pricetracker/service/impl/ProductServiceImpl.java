@@ -9,14 +9,21 @@ import com.pricetracker.exception.ResourceNotFoundException;
 import com.pricetracker.repository.OfferRepository;
 import com.pricetracker.repository.ProductRepository;
 import com.pricetracker.service.ProductService;
+import com.pricetracker.util.TextUtils;
+import jakarta.persistence.criteria.Predicate;
 import lombok.RequiredArgsConstructor;
 import org.modelmapper.ModelMapper;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -24,6 +31,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
 public class ProductServiceImpl implements ProductService {
+
+    private static final int MAX_SEARCH_RESULTS = 50;
 
     private final ProductRepository productRepository;
     private final OfferRepository offerRepository;
@@ -35,7 +44,14 @@ public class ProductServiceImpl implements ProductService {
             return List.of();
         }
 
-        List<Product> products = productRepository.findByNameContainingIgnoreCaseOrderByNameAsc(query.trim());
+        // Every word must appear somewhere: "logitech g502" finds "Gaming mouse Logitech - G502 Hero"
+        Specification<Product> allWords = Arrays.stream(query.trim().toLowerCase(Locale.ROOT).split("\\s+"))
+                .map(this::matchesWord)
+                .reduce(Specification::and)
+                .orElseThrow();
+        List<Product> products = productRepository
+                .findAll(allWords, PageRequest.of(0, MAX_SEARCH_RESULTS, Sort.by("name")))
+                .getContent();
         if (products.isEmpty()) {
             return List.of();
         }
@@ -68,6 +84,20 @@ public class ProductServiceImpl implements ProductService {
                 .toList());
         dto.setLowestPrice(lowestInStockPrice(offers));
         return dto;
+    }
+
+    // The word is in the name or the brand, or it is part of the model code ("910-005470")
+    private Specification<Product> matchesWord(String word) {
+        String pattern = "%" + word + "%";
+        String modelCode = TextUtils.normalizeModelCode(word);
+        return (root, query, cb) -> {
+            Predicate inName = cb.like(cb.lower(root.get("name")), pattern);
+            Predicate inBrand = cb.like(cb.lower(root.get("brand")), pattern);
+            if (modelCode == null) {
+                return cb.or(inName, inBrand);
+            }
+            return cb.or(inName, inBrand, cb.like(root.get("modelCode"), "%" + modelCode + "%"));
+        };
     }
 
     private BigDecimal lowestInStockPrice(List<Offer> offers) {

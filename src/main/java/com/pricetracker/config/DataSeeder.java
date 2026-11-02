@@ -23,7 +23,6 @@ public class DataSeeder implements CommandLineRunner {
         }
 
         storeRepository.saveAll(List.of(
-                store("emag", "eMAG", "https://www.emag.bg", StoreStatus.ACTIVE, null),
                 store("ozone", "Ozone", "https://www.ozone.bg", StoreStatus.ACTIVE, null),
                 store("pic", "PIC.bg", "https://www.pic.bg", StoreStatus.ACTIVE, null),
                 store("gplay", "GPlay", "https://gplay.bg", StoreStatus.ACTIVE, null),

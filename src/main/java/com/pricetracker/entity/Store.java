@@ -21,7 +21,7 @@ public class Store {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // Short unique code: emag, ozone, pic...
+    // Short unique code: ozone, pic, gplay...
     @Column(nullable = false, unique = true, length = 50)
     private String code;
 
