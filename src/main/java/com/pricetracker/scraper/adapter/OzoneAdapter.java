@@ -24,6 +24,21 @@ public class OzoneAdapter implements StoreAdapter {
     }
 
     @Override
+    public String sitemapUrl() {
+        return "https://www.ozone.bg/sitemap_index.xml";
+    }
+
+    @Override
+    public boolean isProductSitemap(String sitemapUrl) {
+        return sitemapUrl.contains("/sitemap-products-");
+    }
+
+    @Override
+    public boolean isProductUrl(String url) {
+        return url.contains("/product/");
+    }
+
+    @Override
     public ScrapedProduct parseProduct(Document page) {
         ScrapedProduct product = new ScrapedProduct();
         String ogTitle = HtmlUtils.meta(page, "og:title");

@@ -7,11 +7,14 @@ import com.pricetracker.scraper.ScrapedProduct;
 import org.jsoup.nodes.Document;
 import org.springframework.stereotype.Component;
 
+import java.util.regex.Pattern;
+
 // PIC has full JSON-LD with EAN, but cuts long names with "..."
 @Component
 public class PicAdapter extends JsonLdStoreAdapter {
 
     private static final int MAX_DESCRIPTION_AS_TITLE = 200;
+    private static final Pattern PRODUCT_URL = Pattern.compile("https://www\\.pic\\.bg/[a-z0-9-]+-\\d+");
 
     public PicAdapter(JsonLdParser jsonLdParser) {
         super(jsonLdParser);
@@ -20,6 +23,16 @@ public class PicAdapter extends JsonLdStoreAdapter {
     @Override
     public String storeCode() {
         return "pic";
+    }
+
+    @Override
+    public String sitemapUrl() {
+        return "https://www.pic.bg/sitemap.xml";
+    }
+
+    @Override
+    public boolean isProductUrl(String url) {
+        return PRODUCT_URL.matcher(url).matches();
     }
 
     @Override

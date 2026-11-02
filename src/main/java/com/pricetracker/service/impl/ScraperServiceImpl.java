@@ -7,32 +7,23 @@ import com.pricetracker.repository.StoreRepository;
 import com.pricetracker.scraper.PageFetcher;
 import com.pricetracker.scraper.ScrapedProduct;
 import com.pricetracker.scraper.StoreAdapter;
+import com.pricetracker.scraper.StoreAdapters;
 import com.pricetracker.service.ScraperService;
+import lombok.RequiredArgsConstructor;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.List;
-import java.util.Map;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 @Service
+@RequiredArgsConstructor
 public class ScraperServiceImpl implements ScraperService {
 
     private final StoreRepository storeRepository;
     private final PageFetcher pageFetcher;
-    private final Map<String, StoreAdapter> adaptersByStoreCode;
-
-    // Spring passes every @Component that implements StoreAdapter (Ozone, PIC...)
-    public ScraperServiceImpl(StoreRepository storeRepository, PageFetcher pageFetcher, List<StoreAdapter> adapters) {
-        this.storeRepository = storeRepository;
-        this.pageFetcher = pageFetcher;
-        this.adaptersByStoreCode = adapters.stream()
-                .collect(Collectors.toMap(StoreAdapter::storeCode, Function.identity()));
-    }
+    private final StoreAdapters storeAdapters;
 
     @Override
     public ScrapedProduct scrape(String url) {
@@ -43,10 +34,8 @@ public class ScraperServiceImpl implements ScraperService {
             throw new IllegalArgumentException(store.getName() + " is " + store.getStatus()
                     + (store.getLastError() != null ? " (" + store.getLastError() + ")" : ""));
         }
-        StoreAdapter adapter = adaptersByStoreCode.get(store.getCode());
-        if (adapter == null) {
-            throw new IllegalArgumentException("Reading products from " + store.getName() + " is not supported yet");
-        }
+        StoreAdapter adapter = storeAdapters.find(store.getCode())
+                .orElseThrow(() -> new IllegalArgumentException("Reading products from " + store.getName() + " is not supported yet"));
 
         Document page = pageFetcher.fetch(uri.toString(), store.getCrawlDelayMs());
         ScrapedProduct product = adapter.parseProduct(page);
@@ -78,7 +67,6 @@ public class ScraperServiceImpl implements ScraperService {
         }
     }
 
-    // Finds the store by comparing hosts without "www.": pic.bg == www.pic.bg
     private Store findStore(String host) {
         String wanted = withoutWww(host);
         return storeRepository.findAll().stream()
