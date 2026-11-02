@@ -47,4 +47,8 @@ public class Store {
 
     @Column(name = "last_error", length = 1000)
     private String lastError;
+
+    // When the product links were last downloaded from the store's sitemaps
+    @Column(name = "catalog_updated_at")
+    private LocalDateTime catalogUpdatedAt;
 }

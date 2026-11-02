@@ -15,6 +15,9 @@ import java.net.URI;
 public class PageFetcher {
 
     private static final int MAX_PAGE_SIZE = 10 * 1024 * 1024;
+    // One PIC sitemap is ~10 MB (50 000 links)
+    private static final int MAX_SITEMAP_SIZE = 100 * 1024 * 1024;
+    private static final int SITEMAP_TIMEOUT_MS = 120_000;
 
     private final RobotsTxtChecker robotsTxtChecker;
     private final RateLimiter rateLimiter;
@@ -32,6 +35,18 @@ public class PageFetcher {
     }
 
     public Document fetch(String url, long delayMs) {
+        try {
+            return download(url, delayMs, MAX_PAGE_SIZE, timeoutMs).parse();
+        } catch (IOException e) {
+            throw new ScrapingException("Could not read " + url + ": " + e.getMessage(), e);
+        }
+    }
+
+    public String fetchText(String url, long delayMs) {
+        return download(url, delayMs, MAX_SITEMAP_SIZE, SITEMAP_TIMEOUT_MS).body();
+    }
+
+    private Connection.Response download(String url, long delayMs, int maxSize, int timeout) {
         if (!robotsTxtChecker.isAllowed(url)) {
             throw new ScrapingException("The store's robots.txt does not allow this page: " + url);
         }
@@ -41,9 +56,10 @@ public class PageFetcher {
             Connection.Response response = Jsoup.connect(url)
                     .userAgent(userAgent)
                     .header("Accept-Language", "bg-BG,bg;q=0.9,en;q=0.8")
-                    .timeout(timeoutMs)
-                    .maxBodySize(MAX_PAGE_SIZE)
+                    .timeout(timeout)
+                    .maxBodySize(maxSize)
                     .followRedirects(true)
+                    .ignoreContentType(true)
                     .ignoreHttpErrors(true)
                     .execute();
 
@@ -54,7 +70,7 @@ public class PageFetcher {
             if (status != 200) {
                 throw new ScrapingException("The store returned HTTP " + status + " for " + url);
             }
-            return response.parse();
+            return response;
         } catch (IOException e) {
             throw new ScrapingException("Could not download " + url + ": " + e.getMessage(), e);
         }

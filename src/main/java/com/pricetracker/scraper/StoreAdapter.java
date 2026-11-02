@@ -9,4 +9,19 @@ public interface StoreAdapter {
     String storeCode();
 
     ScrapedProduct parseProduct(Document page);
+
+    // The sitemap (or sitemap index) that lists the store's products.
+    // null = the store's products can't be searched by word yet.
+    default String sitemapUrl() {
+        return null;
+    }
+
+    // A sitemap index can also list categories, blog posts etc.
+    default boolean isProductSitemap(String sitemapUrl) {
+        return true;
+    }
+
+    default boolean isProductUrl(String url) {
+        return true;
+    }
 }

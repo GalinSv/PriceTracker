@@ -49,6 +49,12 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(ApiResponse.error("Missing parameter: " + ex.getParameterName()));
     }
 
+    // e.g. a refresh is requested while another one is still running
+    @ExceptionHandler(IllegalStateException.class)
+    public ResponseEntity<ApiResponse<Void>> handleIllegalState(IllegalStateException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.error(ex.getMessage()));
+    }
+
     // The store page could not be downloaded or read: the problem is on the store's side
     @ExceptionHandler(ScrapingException.class)
     public ResponseEntity<ApiResponse<Void>> handleScraping(ScrapingException ex) {
