@@ -40,7 +40,7 @@ public class Store {
 
     // Pause between two requests to this store
     @Column(name = "crawl_delay_ms", nullable = false)
-    private Integer crawlDelayMs = 3000;
+    private Integer crawlDelayMs = 1000;
 
     @Column(name = "last_success_at")
     private LocalDateTime lastSuccessAt;

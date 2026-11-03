@@ -11,6 +11,7 @@ public interface StoreAdapter {
     ScrapedProduct parseProduct(Document page);
 
     // The sitemap (or sitemap index) that lists the store's products.
+    // Stores without an index can give their robots.txt, which lists the sitemaps.
     // null = the store's products can't be searched by word yet.
     default String sitemapUrl() {
         return null;
@@ -23,5 +24,10 @@ public interface StoreAdapter {
 
     default boolean isProductUrl(String url) {
         return true;
+    }
+
+    // For sitemaps where only the whole <url> entry (images etc.) tells products from categories
+    default boolean isProductEntry(String url, String entryXml) {
+        return isProductUrl(url);
     }
 }

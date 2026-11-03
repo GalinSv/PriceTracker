@@ -2,6 +2,7 @@ package com.pricetracker.controller;
 
 import com.pricetracker.dto.ApiResponse;
 import com.pricetracker.dto.CatalogEntryDto;
+import com.pricetracker.dto.CatalogPageDto;
 import com.pricetracker.dto.CatalogStatusDto;
 import com.pricetracker.service.CatalogService;
 import lombok.RequiredArgsConstructor;
@@ -21,9 +22,18 @@ public class CatalogController {
 
     private final CatalogService catalogService;
 
+    // stores is optional: ?stores=pic,ozone. page starts from 0.
     @GetMapping("/search")
-    public ResponseEntity<ApiResponse<List<CatalogEntryDto>>> search(@RequestParam(defaultValue = "") String query) {
-        return ResponseEntity.ok(ApiResponse.ok(catalogService.search(query)));
+    public ResponseEntity<ApiResponse<CatalogPageDto>> search(@RequestParam(defaultValue = "") String query,
+                                                              @RequestParam(required = false) List<String> stores,
+                                                              @RequestParam(defaultValue = "0") int page) {
+        return ResponseEntity.ok(ApiResponse.ok(catalogService.search(query, stores, page)));
+    }
+
+    // For search results that came without a fresh price
+    @PostMapping("/check")
+    public ResponseEntity<ApiResponse<CatalogEntryDto>> check(@RequestParam String url) {
+        return ResponseEntity.ok(ApiResponse.ok(catalogService.check(url)));
     }
 
     @GetMapping("/status")

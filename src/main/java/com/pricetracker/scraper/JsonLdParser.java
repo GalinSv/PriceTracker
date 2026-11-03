@@ -2,8 +2,10 @@ package com.pricetracker.scraper;
 
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.jsoup.parser.Parser;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
+import tools.jackson.core.json.JsonReadFeature;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -14,7 +16,10 @@ import java.util.Optional;
 @Component
 public class JsonLdParser {
 
-    private final JsonMapper jsonMapper = JsonMapper.builder().build();
+    // Some stores put raw new lines inside JSON strings, which strict JSON does not allow
+    private final JsonMapper jsonMapper = JsonMapper.builder()
+            .enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS)
+            .build();
 
     public Optional<JsonNode> findProduct(Document page) {
         for (Element script : page.select("script[type=application/ld+json]")) {
@@ -128,8 +133,8 @@ public class JsonLdParser {
         if (value == null || !value.isValueNode() || value.isNull()) {
             return null;
         }
-        // Some stores HTML-escape the JSON, e.g. "&amp;" in image URLs
-        String text = value.asString().replace("&amp;", "&").trim();
+        // Some stores HTML-escape the JSON, e.g. "&amp;" in image URLs or 2.5&quot; in names
+        String text = Parser.unescapeEntities(value.asString(), false).trim();
         return text.isEmpty() ? null : text;
     }
 }

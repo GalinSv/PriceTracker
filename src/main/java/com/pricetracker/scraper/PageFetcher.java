@@ -8,8 +8,12 @@ import org.jsoup.nodes.Document;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.util.zip.GZIPInputStream;
 
 @Component
 public class PageFetcher {
@@ -43,7 +47,25 @@ public class PageFetcher {
     }
 
     public String fetchText(String url, long delayMs) {
-        return download(url, delayMs, MAX_SITEMAP_SIZE, SITEMAP_TIMEOUT_MS).body();
+        Connection.Response response = download(url, delayMs, MAX_SITEMAP_SIZE, SITEMAP_TIMEOUT_MS);
+        byte[] body = response.bodyAsBytes();
+        // .xml.gz sitemaps are gzip files, not gzip-encoded responses, so jsoup doesn't unpack them
+        if (!isGzip(body)) {
+            return response.body();
+        }
+        try (InputStream unpacked = new GZIPInputStream(new ByteArrayInputStream(body))) {
+            byte[] text = unpacked.readNBytes(MAX_SITEMAP_SIZE + 1);
+            if (text.length > MAX_SITEMAP_SIZE) {
+                throw new ScrapingException("The unpacked file is bigger than " + MAX_SITEMAP_SIZE + " bytes: " + url);
+            }
+            return new String(text, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new ScrapingException("Could not unpack " + url + ": " + e.getMessage(), e);
+        }
+    }
+
+    private boolean isGzip(byte[] data) {
+        return data.length >= 2 && data[0] == (byte) 0x1f && data[1] == (byte) 0x8b;
     }
 
     private Connection.Response download(String url, long delayMs, int maxSize, int timeout) {
