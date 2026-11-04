@@ -65,7 +65,9 @@ public class CatalogServiceImpl implements CatalogService {
     private static final Pattern MODEL_CODE = Pattern.compile("(?=.*[a-z])(?=.*\\d)[a-z0-9]{4,}");
     // "144hz", "16gb", "512gb" are sizes, not model codes
     private static final Pattern NUMBER_WITH_UNIT = Pattern.compile("\\d+[a-z]{1,3}");
-    private static final int PAGE_SIZE = 20;
+    // "Load all results" asks for this many at once
+    private static final int MAX_PAGE_SIZE = 300;
+    private static final int MAX_EANS = 10;
     private static final int MAX_WORDS = 12;
     // Up to this many words, every word must be found; longer searches are scored
     private static final int MAX_REQUIRED_WORDS = 3;
@@ -88,8 +90,8 @@ public class CatalogServiceImpl implements CatalogService {
             e.ean, e.brand, e.model_code, e.image_url, s.code, s.name,
             o.product_id, o.title AS offer_title, o.current_price AS offer_price,
             o.currency AS offer_currency, o.in_stock AS offer_in_stock,
-            p.ean AS product_ean, p.brand AS product_brand, p.model_code AS product_model_code,
-            p.image_url AS product_image_url
+            (SELECT string_agg(pe.ean, ',') FROM product_eans pe WHERE pe.product_id = p.id) AS product_eans,
+            p.brand AS product_brand, p.model_code AS product_model_code, p.image_url AS product_image_url
             """;
     private static final String ENTRY_TABLES = """
             FROM catalog_entries e
@@ -114,14 +116,18 @@ public class CatalogServiceImpl implements CatalogService {
     }
 
     @Override
-    public CatalogPageDto search(String query, List<String> storeCodes, int page) {
-        List<String> words = queryWords(query);
+    public CatalogPageDto search(String query, List<String> storeCodes, int page, int size) {
+        List<String> words = TextUtils.searchWords(query).stream().limit(MAX_WORDS).toList();
         if (words.isEmpty()) {
             return new CatalogPageDto(List.of(), false);
         }
+        int pageSize = Math.min(Math.max(size, 1), MAX_PAGE_SIZE);
         List<String> stores = storeCodes == null ? List.of() : storeCodes;
         String storeFilter = stores.isEmpty() ? ""
                 : " AND s.code IN (" + String.join(", ", Collections.nCopies(stores.size(), "?")) + ")";
+        // Links with the words next to each other, e.g. "jbl flip 7", come before the rest
+        String phraseFirst = "(e.search_text LIKE ?) DESC";
+        String phrase = "%" + String.join(" ", words) + "%";
 
         StringBuilder sql = new StringBuilder("SELECT ").append(ENTRY_COLUMNS);
         List<Object> params = new ArrayList<>();
@@ -129,47 +135,60 @@ public class CatalogServiceImpl implements CatalogService {
             // Short searches: every word must be there
             sql.append(" ").append(ENTRY_TABLES).append(" WHERE s.status = 'ACTIVE'").append(storeFilter);
             params.addAll(stores);
-            for (String word : words) {
-                sql.append(" AND e.search_text LIKE ?");
-                params.add("%" + word + "%");
+            for (int i = 0; i < words.size(); i++) {
+                sql.append(" AND ").append(wordCondition(words, i, params));
             }
-            // Shorter links first: "logitech g502 hero" before "case for logitech g502 hero black ..."
-            sql.append(" ORDER BY length(e.search_text), e.url");
+            // Then shorter links: "logitech g502 hero" before "case for logitech g502 hero black ..."
+            sql.append(" ORDER BY ").append(phraseFirst).append(", length(e.search_text), e.url");
+            params.add(phrase);
         } else {
             // Longer searches, e.g. a name copied from a store, rarely match word for word.
             // Each word found gives points, a model code more, and half of all points is enough.
             StringBuilder score = new StringBuilder("(0");
             List<Object> scoreParams = new ArrayList<>();
             int maxScore = 0;
-            for (String word : words) {
-                int weight = isModelCode(word) ? MODEL_CODE_WEIGHT : 1;
-                score.append(" + ").append(weight).append(" * (e.search_text LIKE ?)::int");
-                scoreParams.add("%" + word + "%");
+            for (int i = 0; i < words.size(); i++) {
+                int weight = isModelCode(words.get(i)) ? MODEL_CODE_WEIGHT : 1;
+                score.append(" + ").append(weight).append(" * (").append(wordCondition(words, i, scoreParams))
+                        .append(")::int");
                 maxScore += weight;
             }
             score.append(")");
             sql.append(", ").append(score).append(" AS score ").append(ENTRY_TABLES)
                     .append(" WHERE s.status = 'ACTIVE'").append(storeFilter)
                     .append(" AND ").append(score).append(" >= ?")
-                    .append(" ORDER BY score DESC, length(e.search_text), e.url");
+                    .append(" ORDER BY score DESC, ").append(phraseFirst).append(", length(e.search_text), e.url");
             params.addAll(scoreParams);
             params.addAll(stores);
             params.addAll(scoreParams);
             params.add((maxScore + 1) / 2);
+            params.add(phrase);
         }
 
         // One more than a page, to know if there is a next one
-        sql.append(" LIMIT ").append(PAGE_SIZE + 1).append(" OFFSET ").append((long) Math.max(page, 0) * PAGE_SIZE);
+        sql.append(" LIMIT ").append(pageSize + 1).append(" OFFSET ").append((long) Math.max(page, 0) * pageSize);
         List<CatalogEntryDto> found = jdbcTemplate.query(sql.toString(), this::toDto, params.toArray());
-        boolean hasMore = found.size() > PAGE_SIZE;
-        return new CatalogPageDto(hasMore ? found.subList(0, PAGE_SIZE) : found, hasMore);
+        boolean hasMore = found.size() > pageSize;
+        return new CatalogPageDto(hasMore ? found.subList(0, pageSize) : found, hasMore);
     }
 
-    // Single letters and digits ("0" from "16.0") would match almost every link
-    private List<String> queryWords(String query) {
-        List<String> words = TextUtils.searchWords(query);
-        List<String> longer = words.stream().filter(word -> word.length() > 1).toList();
-        return (longer.isEmpty() ? words : longer).stream().limit(MAX_WORDS).toList();
+    // Short words like the "7" in "flip 7" must stand alone ("flip 7", "256gb") or be glued to the word
+    // before them ("flip7"). As a part of any word they would match almost every link ("... 786543").
+    private String wordCondition(List<String> words, int index, List<Object> params) {
+        String word = words.get(index);
+        if (!isShortWord(word)) {
+            params.add("%" + word + "%");
+            return "e.search_text LIKE ?";
+        }
+        String gluedTo = index == 0 ? "" : "|" + words.get(index - 1);
+        String after = Character.isDigit(word.charAt(0)) ? "([^0-9]|$)" : "([^a-z]|$)";
+        params.add("(^| " + gluedTo + ")" + word + after);
+        return "e.search_text ~ ?";
+    }
+
+    // One letter, or a number of up to three digits: "x", "7", "256"
+    private boolean isShortWord(String word) {
+        return word.length() == 1 || (word.length() <= 3 && word.chars().allMatch(Character::isDigit));
     }
 
     private boolean isModelCode(String word) {
@@ -194,12 +213,16 @@ public class CatalogServiceImpl implements CatalogService {
             log.debug("Could not check {}: {}", url, e.getMessage());
         }
         String modelCode = null;
+        String eans = null;
         if (product != null) {
             modelCode = TextUtils.normalizeModelCode(product.getModelCode());
+            // Ten whole barcodes fit in the column, so none is ever cut in half
+            eans = product.getEans().isEmpty() ? null
+                    : String.join(",", product.getEans().stream().limit(MAX_EANS).toList());
             entry.setName(product.getTitle());
             setPrice(entry, product.getPrice(), product.getCurrency(), product.getInStock());
-            setIdentity(entry, TextUtils.truncate(product.getEan(), 20), TextUtils.truncate(product.getBrand(), 100),
-                    modelCode, TextUtils.truncate(product.getImageUrl(), 1000));
+            setIdentity(entry, eans, TextUtils.truncate(product.getBrand(), 100), modelCode,
+                    TextUtils.truncate(product.getImageUrl(), 1000));
         } else {
             setPrice(entry, null, null, null);
         }
@@ -215,7 +238,7 @@ public class CatalogServiceImpl implements CatalogService {
                         """,
                 product == null ? null : TextUtils.truncate(product.getTitle(), 500),
                 entry.getPrice(), entry.getCurrency(), entry.getInStock(), Timestamp.valueOf(LocalDateTime.now()),
-                entry.getEan(), entry.getBrand(), modelCode, entry.getImageUrl(), url);
+                eans, entry.getBrand(), modelCode, entry.getImageUrl(), url);
         return entry;
     }
 
@@ -231,7 +254,7 @@ public class CatalogServiceImpl implements CatalogService {
             dto.setName(rs.getString("offer_title"));
             setPrice(dto, rs.getBigDecimal("offer_price"), rs.getString("offer_currency"),
                     rs.getObject("offer_in_stock", Boolean.class));
-            setIdentity(dto, rs.getString("product_ean"), rs.getString("product_brand"),
+            setIdentity(dto, rs.getString("product_eans"), rs.getString("product_brand"),
                     rs.getString("product_model_code"), rs.getString("product_image_url"));
             return dto;
         }
@@ -255,8 +278,9 @@ public class CatalogServiceImpl implements CatalogService {
         dto.setChecked(true);
     }
 
-    private void setIdentity(CatalogEntryDto dto, String ean, String brand, String modelCode, String imageUrl) {
-        dto.setEan(ean);
+    // eans: comma-separated, as kept in the database
+    private void setIdentity(CatalogEntryDto dto, String eans, String brand, String modelCode, String imageUrl) {
+        dto.setEans(eans == null ? List.of() : List.of(eans.split(",")));
         dto.setBrand(brand);
         dto.setModelKey(brand != null && modelCode != null ? TextUtils.normalizeBrand(brand) + ":" + modelCode : null);
         dto.setImageUrl(imageUrl);

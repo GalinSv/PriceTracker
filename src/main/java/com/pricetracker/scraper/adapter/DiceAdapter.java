@@ -39,7 +39,7 @@ public class DiceAdapter extends JsonLdStoreAdapter {
         String html = page.html();
         product.setBrand(find(BRAND, html));
         product.setModelCode(find(MODEL_CODE, html));
-        product.setEan(find(EAN, page.text()));
+        product.addEans(find(EAN, page.text()));
 
         // Products that can't be bought show a "notify me" button instead of "add to cart"
         product.setInStock(page.getElementById("product-addtocart-button") != null);
