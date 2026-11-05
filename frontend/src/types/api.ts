@@ -73,9 +73,24 @@ export type CatalogEntry = {
     imageUrl: string | null;
 };
 
+export type FacetValue = {
+    value: string;
+    // How many links of the search have it
+    count: number;
+};
+
+export type CatalogFacets = {
+    brands: FacetValue[];
+    series: FacetValue[];
+    memory: FacetValue[];
+    colors: FacetValue[];
+};
+
 export type CatalogPage = {
     entries: CatalogEntry[];
     hasMore: boolean;
+    // Only with the first page
+    facets: CatalogFacets | null;
 };
 
 export type StoreCatalog = {

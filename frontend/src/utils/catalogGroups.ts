@@ -1,3 +1,4 @@
+import type { ServerFilters } from "../services/catalogService";
 import type { CatalogEntry } from "../types/api";
 
 // One product with its offers from the search results of different stores
@@ -18,25 +19,31 @@ export type ProductGroup = {
 
 export type SortOrder = "relevance" | "priceAsc" | "priceDesc" | "stores";
 
-export type CatalogFilters = {
-    // Store codes; empty = all stores
-    stores: string[];
+// The server applies stores, brands, series, memory and colors (empty = all); price and sort apply here
+export type CatalogFilters = ServerFilters & {
     minPrice: number | null;
     maxPrice: number | null;
-    // Brand keys, see brandKey()
-    brands: string[];
     sort: SortOrder;
 };
 
-export const NO_FILTERS: CatalogFilters = { stores: [], minPrice: null, maxPrice: null, brands: [], sort: "relevance" };
+export const NO_FILTERS: CatalogFilters = {
+    stores: [],
+    brands: [],
+    series: [],
+    memory: [],
+    colors: [],
+    minPrice: null,
+    maxPrice: null,
+    sort: "relevance",
+};
+
+export function serverFilters(filters: CatalogFilters): ServerFilters {
+    const { stores, brands, series, memory, colors } = filters;
+    return { stores, brands, series, memory, colors };
+}
 
 export function isAvailable(entry: CatalogEntry) {
     return entry.price != null && entry.inStock !== false;
-}
-
-// "SAMSUNG", "Samsung" and "samsung " are one brand
-export function brandKey(brand: string) {
-    return brand.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 }
 
 // Results are the same product if they share a tracked product, an EAN or brand + model code.
@@ -54,9 +61,10 @@ export function groupEntries(entries: CatalogEntry[]): ProductGroup[] {
 
     const firstWithKey = new Map<string, number>();
     entries.forEach((entry, index) => {
+        // A store can list several barcodes for one product; any shared one is enough
         const keys = [
             entry.productId != null ? `product:${entry.productId}` : null,
-            entry.ean ? `ean:${entry.ean}` : null,
+            ...entry.eans.map((ean) => `ean:${ean}`),
             entry.modelKey ? `model:${entry.modelKey}` : null,
         ];
         for (const key of keys) {
@@ -96,29 +104,8 @@ function toGroup(entries: CatalogEntry[], rank: number): ProductGroup {
     };
 }
 
-// The brands found in the groups, most common first: [key, name as written, count]
-export function brandOptions(groups: ProductGroup[]): [string, string, number][] {
-    const byKey = new Map<string, [string, string, number]>();
-    for (const group of groups) {
-        if (!group.brand) continue;
-        const key = brandKey(group.brand);
-        const known = byKey.get(key);
-        if (known) {
-            known[2] += 1;
-            // Prefer "Samsung" over "SAMSUNG"
-            if (known[1] === known[1].toUpperCase()) known[1] = group.brand;
-        } else {
-            byKey.set(key, [key, group.brand, 1]);
-        }
-    }
-    return [...byKey.values()].sort((a, b) => b[2] - a[2] || a[1].localeCompare(b[1]));
-}
-
 export function filterAndSort(groups: ProductGroup[], filters: CatalogFilters): ProductGroup[] {
     const filtered = groups.filter((group) => {
-        if (filters.brands.length > 0 && !(group.brand && filters.brands.includes(brandKey(group.brand)))) {
-            return false;
-        }
         const price = groupPrice(group);
         if (filters.minPrice != null && (price == null || price < filters.minPrice)) return false;
         if (filters.maxPrice != null && (price == null || price > filters.maxPrice)) return false;

@@ -1,6 +1,8 @@
 package com.pricetracker.service.impl;
 
 import com.pricetracker.dto.CatalogEntryDto;
+import com.pricetracker.dto.CatalogFacetsDto;
+import com.pricetracker.dto.CatalogFiltersDto;
 import com.pricetracker.dto.CatalogPageDto;
 import com.pricetracker.dto.CatalogStatusDto;
 import com.pricetracker.entity.Store;
@@ -16,6 +18,7 @@ import com.pricetracker.scraper.StoreAdapter;
 import com.pricetracker.scraper.StoreAdapters;
 import com.pricetracker.service.CatalogService;
 import com.pricetracker.service.ScraperService;
+import com.pricetracker.util.FacetExtractor;
 import com.pricetracker.util.TextUtils;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
@@ -32,6 +35,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,6 +72,7 @@ public class CatalogServiceImpl implements CatalogService {
     // "Load all results" asks for this many at once
     private static final int MAX_PAGE_SIZE = 300;
     private static final int MAX_EANS = 10;
+    private static final int MAX_FACET_VALUES = 40;
     private static final int MAX_WORDS = 12;
     // Up to this many words, every word must be found; longer searches are scored
     private static final int MAX_REQUIRED_WORDS = 3;
@@ -77,11 +82,14 @@ public class CatalogServiceImpl implements CatalogService {
     // Bulk insert with plain SQL: JPA would save 1 000 000 links one by one.
     // A name read from a product page is kept over the one from the sitemap.
     private static final String UPSERT_SQL = """
-            INSERT INTO catalog_entries (store_id, url, search_text, title, last_seen_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO catalog_entries (store_id, url, search_text, title, last_seen_at,
+                                         facet_brand, facet_series, facet_memory, facet_color)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (url) DO UPDATE
             SET store_id = EXCLUDED.store_id, search_text = EXCLUDED.search_text,
-                title = COALESCE(catalog_entries.title, EXCLUDED.title), last_seen_at = EXCLUDED.last_seen_at
+                title = COALESCE(catalog_entries.title, EXCLUDED.title), last_seen_at = EXCLUDED.last_seen_at,
+                facet_brand = EXCLUDED.facet_brand, facet_series = EXCLUDED.facet_series,
+                facet_memory = EXCLUDED.facet_memory, facet_color = EXCLUDED.facet_color
             """;
 
     // For a tracked link (one that has an offer) the offer's name and price and its product's EAN and model are used
@@ -116,60 +124,142 @@ public class CatalogServiceImpl implements CatalogService {
     }
 
     @Override
-    public CatalogPageDto search(String query, List<String> storeCodes, int page, int size) {
+    public CatalogPageDto search(String query, CatalogFiltersDto filters, int page, int size, boolean withFacets) {
         List<String> words = TextUtils.searchWords(query).stream().limit(MAX_WORDS).toList();
         if (words.isEmpty()) {
-            return new CatalogPageDto(List.of(), false);
+            return new CatalogPageDto(List.of(), false, null);
         }
+        CatalogFiltersDto chosen = filters == null ? new CatalogFiltersDto() : filters;
         int pageSize = Math.min(Math.max(size, 1), MAX_PAGE_SIZE);
-        List<String> stores = storeCodes == null ? List.of() : storeCodes;
-        String storeFilter = stores.isEmpty() ? ""
-                : " AND s.code IN (" + String.join(", ", Collections.nCopies(stores.size(), "?")) + ")";
+        WordMatch match = wordMatch(words);
+        Clause stores = Clause.in("s.code", chosen.getStores());
+        Clause facetFilters = Clause.in("e.facet_brand", chosen.getBrands())
+                .and(Clause.in("e.facet_series", chosen.getSeries()))
+                .and(Clause.in("e.facet_memory", chosen.getMemory()))
+                .and(Clause.in("e.facet_color", chosen.getColors()));
+
+        String sql = "SELECT " + ENTRY_COLUMNS + match.select() + " " + ENTRY_TABLES
+                + " WHERE s.status = 'ACTIVE'" + stores.sql() + facetFilters.sql() + match.where()
+                + " ORDER BY " + match.orderBy()
+                // One more than a page, to know if there is a next one
+                + " LIMIT " + (pageSize + 1) + " OFFSET " + (long) Math.max(page, 0) * pageSize;
+        List<Object> params = new ArrayList<>(match.selectParams());
+        params.addAll(stores.params());
+        params.addAll(facetFilters.params());
+        params.addAll(match.whereParams());
+        params.addAll(match.orderParams());
+
+        List<CatalogEntryDto> found = jdbcTemplate.query(sql, this::toDto, params.toArray());
+        boolean hasMore = found.size() > pageSize;
+        CatalogFacetsDto facets = withFacets
+                ? countFacets(match, stores, Clause.in("e.facet_brand", chosen.getBrands()))
+                : null;
+        return new CatalogPageDto(hasMore ? found.subList(0, pageSize) : found, hasMore, facets);
+    }
+
+    // The part of the query that finds the search words, shared by the results and the filter counts
+    private record WordMatch(String select, List<Object> selectParams, String where, List<Object> whereParams,
+                             String orderBy, List<Object> orderParams) {
+    }
+
+    // "AND column IN (?, ?)" with its values; empty when nothing is chosen
+    private record Clause(String sql, List<Object> params) {
+        static Clause in(String column, List<String> values) {
+            if (values == null || values.isEmpty()) {
+                return new Clause("", List.of());
+            }
+            return new Clause(" AND " + column + " IN (" + String.join(", ", Collections.nCopies(values.size(), "?")) + ")",
+                    List.copyOf(values));
+        }
+
+        Clause and(Clause other) {
+            List<Object> both = new ArrayList<>(params);
+            both.addAll(other.params());
+            return new Clause(sql + other.sql(), both);
+        }
+    }
+
+    private WordMatch wordMatch(List<String> words) {
         // Links with the words next to each other, e.g. "jbl flip 7", come before the rest
         String phraseFirst = "(e.search_text LIKE ?) DESC";
-        String phrase = "%" + String.join(" ", words) + "%";
+        List<Object> phrase = List.of("%" + String.join(" ", words) + "%");
 
-        StringBuilder sql = new StringBuilder("SELECT ").append(ENTRY_COLUMNS);
-        List<Object> params = new ArrayList<>();
         if (words.size() <= MAX_REQUIRED_WORDS) {
             // Short searches: every word must be there
-            sql.append(" ").append(ENTRY_TABLES).append(" WHERE s.status = 'ACTIVE'").append(storeFilter);
-            params.addAll(stores);
+            StringBuilder where = new StringBuilder();
+            List<Object> whereParams = new ArrayList<>();
             for (int i = 0; i < words.size(); i++) {
-                sql.append(" AND ").append(wordCondition(words, i, params));
+                where.append(" AND ").append(wordCondition(words, i, whereParams));
             }
             // Then shorter links: "logitech g502 hero" before "case for logitech g502 hero black ..."
-            sql.append(" ORDER BY ").append(phraseFirst).append(", length(e.search_text), e.url");
-            params.add(phrase);
-        } else {
-            // Longer searches, e.g. a name copied from a store, rarely match word for word.
-            // Each word found gives points, a model code more, and half of all points is enough.
-            StringBuilder score = new StringBuilder("(0");
-            List<Object> scoreParams = new ArrayList<>();
-            int maxScore = 0;
-            for (int i = 0; i < words.size(); i++) {
-                int weight = isModelCode(words.get(i)) ? MODEL_CODE_WEIGHT : 1;
-                score.append(" + ").append(weight).append(" * (").append(wordCondition(words, i, scoreParams))
-                        .append(")::int");
-                maxScore += weight;
-            }
-            score.append(")");
-            sql.append(", ").append(score).append(" AS score ").append(ENTRY_TABLES)
-                    .append(" WHERE s.status = 'ACTIVE'").append(storeFilter)
-                    .append(" AND ").append(score).append(" >= ?")
-                    .append(" ORDER BY score DESC, ").append(phraseFirst).append(", length(e.search_text), e.url");
-            params.addAll(scoreParams);
-            params.addAll(stores);
-            params.addAll(scoreParams);
-            params.add((maxScore + 1) / 2);
-            params.add(phrase);
+            return new WordMatch("", List.of(), where.toString(), whereParams,
+                    phraseFirst + ", length(e.search_text), e.url", phrase);
         }
 
-        // One more than a page, to know if there is a next one
-        sql.append(" LIMIT ").append(pageSize + 1).append(" OFFSET ").append((long) Math.max(page, 0) * pageSize);
-        List<CatalogEntryDto> found = jdbcTemplate.query(sql.toString(), this::toDto, params.toArray());
-        boolean hasMore = found.size() > pageSize;
-        return new CatalogPageDto(hasMore ? found.subList(0, pageSize) : found, hasMore);
+        // Longer searches, e.g. a name copied from a store, rarely match word for word.
+        // Each word found gives points, a model code more, and half of all points is enough.
+        StringBuilder score = new StringBuilder("(0");
+        List<Object> scoreParams = new ArrayList<>();
+        int maxScore = 0;
+        for (int i = 0; i < words.size(); i++) {
+            int weight = isModelCode(words.get(i)) ? MODEL_CODE_WEIGHT : 1;
+            score.append(" + ").append(weight).append(" * (").append(wordCondition(words, i, scoreParams))
+                    .append(")::int");
+            maxScore += weight;
+        }
+        score.append(")");
+        List<Object> whereParams = new ArrayList<>(scoreParams);
+        whereParams.add((maxScore + 1) / 2);
+        return new WordMatch(", " + score + " AS score", scoreParams, " AND " + score + " >= ?", whereParams,
+                "score DESC, " + phraseFirst + ", length(e.search_text), e.url", phrase);
+    }
+
+    // How many links of the search have each brand, series, memory and color. The other filters are left out,
+    // so the counts stay the same while you tick values and a second brand can be added.
+    // Only the series follow the chosen brands, so "Razer" shows Razer's series.
+    private CatalogFacetsDto countFacets(WordMatch match, Clause stores, Clause brands) {
+        String brandLinks = brands.sql().isEmpty() ? "count(*)" : "count(*) FILTER (WHERE true" + brands.sql() + ")";
+        String sql = """
+                SELECT e.facet_brand, e.facet_series, e.facet_memory, e.facet_color,
+                       GROUPING(e.facet_brand) AS by_brand, GROUPING(e.facet_series) AS by_series,
+                       GROUPING(e.facet_memory) AS by_memory, count(*) AS links,
+                """ + brandLinks + """
+                 AS brand_links
+                FROM catalog_entries e
+                JOIN stores s ON s.id = e.store_id
+                WHERE s.status = 'ACTIVE'
+                """ + stores.sql() + match.where() + """
+                 GROUP BY GROUPING SETS ((e.facet_brand), (e.facet_series), (e.facet_memory), (e.facet_color))
+                """;
+        List<Object> params = new ArrayList<>(brands.params());
+        params.addAll(stores.params());
+        params.addAll(match.whereParams());
+
+        Map<String, List<CatalogFacetsDto.FacetValue>> byFacet = new LinkedHashMap<>();
+        jdbcTemplate.query(sql, rs -> {
+            String facet = rs.getInt("by_brand") == 0 ? "facet_brand"
+                    : rs.getInt("by_series") == 0 ? "facet_series"
+                    : rs.getInt("by_memory") == 0 ? "facet_memory"
+                    : "facet_color";
+            String value = rs.getString(facet);
+            long links = rs.getLong(facet.equals("facet_series") ? "brand_links" : "links");
+            if (value != null && links > 0) {
+                byFacet.computeIfAbsent(facet, key -> new ArrayList<>())
+                        .add(new CatalogFacetsDto.FacetValue(value, links));
+            }
+        }, params.toArray());
+        return new CatalogFacetsDto(topValues(byFacet.get("facet_brand")), topValues(byFacet.get("facet_series")),
+                topValues(byFacet.get("facet_memory")), topValues(byFacet.get("facet_color")));
+    }
+
+    private List<CatalogFacetsDto.FacetValue> topValues(List<CatalogFacetsDto.FacetValue> values) {
+        if (values == null) {
+            return List.of();
+        }
+        return values.stream()
+                .sorted(Comparator.comparingLong(CatalogFacetsDto.FacetValue::getCount).reversed())
+                .limit(MAX_FACET_VALUES)
+                .toList();
     }
 
     // Short words like the "7" in "flip 7" must stand alone ("flip 7", "256gb") or be glued to the word
@@ -321,14 +411,58 @@ public class CatalogServiceImpl implements CatalogService {
         return true;
     }
 
+    @Override
+    public boolean startFacetRefresh() {
+        if (!updating.compareAndSet(false, true)) {
+            return false;
+        }
+        background.submit(() -> {
+            try {
+                refreshFacets();
+            } catch (RuntimeException e) {
+                log.error("Facet refresh failed", e);
+            } finally {
+                updating.set(false);
+            }
+        });
+        return true;
+    }
+
+    // Reads the filters of every link again from its search words, without downloading the catalogs
+    private void refreshFacets() {
+        FacetExtractor facets = FacetExtractor.load(brandsFromPages());
+        long lastId = 0;
+        int done = 0;
+        while (true) {
+            List<Object[]> rows = jdbcTemplate.query(
+                    "SELECT id, search_text FROM catalog_entries WHERE id > ? ORDER BY id LIMIT " + BATCH_SIZE * 5,
+                    (rs, rowNum) -> {
+                        FacetExtractor.Facets found = facets.extract(rs.getString("search_text"));
+                        return new Object[]{found.brand(), found.series(), found.memory(), found.color(),
+                                rs.getLong("id")};
+                    }, lastId);
+            if (rows.isEmpty()) {
+                break;
+            }
+            jdbcTemplate.batchUpdate("""
+                    UPDATE catalog_entries SET facet_brand = ?, facet_series = ?, facet_memory = ?, facet_color = ?
+                    WHERE id = ?
+                    """, rows);
+            lastId = (Long) rows.get(rows.size() - 1)[4];
+            done += rows.size();
+        }
+        log.info("Filters read again for {} catalog links", done);
+    }
+
     private void updateCatalogs(boolean force) {
+        FacetExtractor facets = FacetExtractor.load(brandsFromPages());
         for (Store store : storeRepository.findAll()) {
             Optional<StoreAdapter> adapter = searchableAdapter(store);
             if (adapter.isEmpty() || (!force && isFresh(store))) {
                 continue;
             }
             try {
-                int links = updateCatalog(store, adapter.get());
+                int links = updateCatalog(store, adapter.get(), facets);
                 log.info("Catalog of {} updated: {} product links", store.getName(), links);
             } catch (RuntimeException e) {
                 log.warn("Could not update the catalog of {}: {}", store.getName(), e.getMessage());
@@ -336,7 +470,15 @@ public class CatalogServiceImpl implements CatalogService {
         }
     }
 
-    private int updateCatalog(Store store, StoreAdapter adapter) {
+    // Brands as product pages write them, to spell the brand filter right
+    private List<String> brandsFromPages() {
+        return jdbcTemplate.queryForList("""
+                SELECT DISTINCT brand FROM catalog_entries WHERE brand IS NOT NULL
+                UNION SELECT DISTINCT brand FROM products WHERE brand IS NOT NULL
+                """, String.class);
+    }
+
+    private int updateCatalog(Store store, StoreAdapter adapter, FacetExtractor facets) {
         LocalDateTime startedAt = LocalDateTime.now();
         long delay = store.getCrawlDelayMs();
 
@@ -347,11 +489,11 @@ public class CatalogServiceImpl implements CatalogService {
             List<String> sitemaps = robotsTxt ? robotsTxtSitemaps(root) : locs(root);
             for (String sitemap : sitemaps) {
                 if (adapter.isProductSitemap(sitemap)) {
-                    saved += saveLinks(store, adapter, pageFetcher.fetchText(sitemap, delay), startedAt);
+                    saved += saveLinks(store, adapter, pageFetcher.fetchText(sitemap, delay), startedAt, facets);
                 }
             }
         } else {
-            saved = saveLinks(store, adapter, root, startedAt);
+            saved = saveLinks(store, adapter, root, startedAt, facets);
         }
 
         // Only reached if every sitemap was downloaded: links we didn't see are no longer sold
@@ -363,7 +505,8 @@ public class CatalogServiceImpl implements CatalogService {
         return saved;
     }
 
-    private int saveLinks(Store store, StoreAdapter adapter, String sitemapXml, LocalDateTime seenAt) {
+    private int saveLinks(Store store, StoreAdapter adapter, String sitemapXml, LocalDateTime seenAt,
+                          FacetExtractor facets) {
         // link -> product name or null. A map, because one SQL batch may not touch the same link twice.
         Map<String, String> links = new LinkedHashMap<>();
         Matcher entries = URL_ENTRY.matcher(sitemapXml);
@@ -381,8 +524,12 @@ public class CatalogServiceImpl implements CatalogService {
 
         Timestamp seen = Timestamp.valueOf(seenAt);
         List<Object[]> rows = links.entrySet().stream()
-                .map(link -> new Object[]{store.getId(), link.getKey(), searchTextOf(link.getKey(), link.getValue()),
-                        link.getValue(), seen})
+                .map(link -> {
+                    String searchText = searchTextOf(link.getKey(), link.getValue());
+                    FacetExtractor.Facets found = facets.extract(searchText);
+                    return new Object[]{store.getId(), link.getKey(), searchText, link.getValue(), seen,
+                            found.brand(), found.series(), found.memory(), found.color()};
+                })
                 .toList();
         for (int from = 0; from < rows.size(); from += BATCH_SIZE) {
             jdbcTemplate.batchUpdate(UPSERT_SQL, rows.subList(from, Math.min(from + BATCH_SIZE, rows.size())));

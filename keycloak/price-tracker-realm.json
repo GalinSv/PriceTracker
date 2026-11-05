@@ -1,0 +1,69 @@
+{
+  "realm": "price-tracker",
+  "displayName": "Price Tracker",
+  "enabled": true,
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "rememberMe": true,
+  "internationalizationEnabled": true,
+  "supportedLocales": ["bg", "en"],
+  "defaultLocale": "bg",
+  "roles": {
+    "realm": [
+      { "name": "user", "description": "Every registered user" },
+      { "name": "admin", "description": "Can update the store catalogs and refresh all prices" },
+      { "name": "offline_access", "description": "${role_offline-access}" },
+      { "name": "uma_authorization", "description": "${role_uma_authorization}" },
+      {
+        "name": "default-roles-price-tracker",
+        "description": "${role_default-roles}",
+        "composite": true,
+        "composites": { "realm": ["offline_access", "uma_authorization", "user"] }
+      }
+    ]
+  },
+  "defaultRole": { "name": "default-roles-price-tracker" },
+  "clients": [
+    {
+      "clientId": "price-tracker-frontend",
+      "name": "Price Tracker",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "rootUrl": "http://localhost:5173",
+      "baseUrl": "/",
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "email": "admin@price-tracker.local",
+      "firstName": "Admin",
+      "lastName": "Price Tracker",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "UG6W8owHV5RYTPv1", "temporary": false }],
+      "realmRoles": ["default-roles-price-tracker", "admin"]
+    },
+    {
+      "username": "user",
+      "email": "user@price-tracker.local",
+      "firstName": "Test",
+      "lastName": "User",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "1fVE6uss4F4IQzvb", "temporary": false }],
+      "realmRoles": ["default-roles-price-tracker"]
+    }
+  ]
+}

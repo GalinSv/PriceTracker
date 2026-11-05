@@ -43,7 +43,7 @@ public class JsonLdParser {
         result.setBrand(nameOf(product.path("brand")));
         result.setModelCode(text(product, "mpn"));
         result.setStoreSku(text(product, "sku"));
-        result.setEan(firstText(product, "gtin13", "gtin", "gtin12", "gtin14", "gtin8"));
+        result.addEans(firstText(product, "gtin13", "gtin", "gtin12", "gtin14", "gtin8"));
         result.setImageUrl(imageOf(product.path("image")));
 
         JsonNode offer = product.path("offers");

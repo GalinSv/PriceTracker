@@ -6,6 +6,7 @@ import com.pricetracker.scraper.ScrapedProduct;
 import org.jsoup.nodes.Document;
 import org.springframework.stereotype.Component;
 
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -15,6 +16,7 @@ import java.util.regex.Pattern;
 public class GPlayAdapter extends JsonLdStoreAdapter {
 
     private static final Pattern MODEL_IN_SKU = Pattern.compile("^[^-]+-[^-]+-(.+)$");
+    private static final int MIN_PART_NUMBER_DIGITS = 5;
 
     public GPlayAdapter(JsonLdParser jsonLdParser) {
         super(jsonLdParser);
@@ -35,9 +37,22 @@ public class GPlayAdapter extends JsonLdStoreAdapter {
     protected void customize(Document page, ScrapedProduct product) {
         if (product.getModelCode() == null && product.getStoreSku() != null) {
             Matcher matcher = MODEL_IN_SKU.matcher(product.getStoreSku());
-            if (matcher.matches()) {
+            if (matcher.matches() && isRealModel(matcher.group(1), product.getTitle())) {
                 product.setModelCode(matcher.group(1));
             }
         }
+    }
+
+    // Some codes are GPlay's own short names: "LOGITECH-MOUSE-PRO2XW" for "G Pro X Superlight 2".
+    // A real model is also in the product name ("G305" in "Logitech G305"),
+    // or is a long part number of the maker ("910-007357", "90NR0KS1-M003H0").
+    private boolean isRealModel(String code, String title) {
+        String compactCode = compact(code);
+        long digits = compactCode.chars().filter(Character::isDigit).count();
+        return compact(title).contains(compactCode) || digits >= MIN_PART_NUMBER_DIGITS;
+    }
+
+    private String compact(String text) {
+        return text == null ? "" : text.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "");
     }
 }

@@ -13,3 +13,9 @@ export async function getProduct(id: number) {
     const response = await axiosInstance.get<ApiResponse<ProductDetails>>(`/products/${id}`);
     return response.data.data;
 }
+
+// Looks for stores that sell the product but are not on its page yet; can take several seconds
+export async function findNewStores(id: number) {
+    const response = await axiosInstance.post<ApiResponse<ProductDetails>>(`/products/${id}/find-stores`);
+    return response.data.data;
+}

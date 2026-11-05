@@ -8,6 +8,7 @@ import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 
 import App from "./App";
+import AuthProvider from "./auth/AuthProvider";
 import theme from "./theme";
 import "./index.css";
 
@@ -16,7 +17,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         <ThemeProvider theme={theme}>
             <CssBaseline />
             <BrowserRouter>
-                <App />
+                <AuthProvider>
+                    <App />
+                </AuthProvider>
             </BrowserRouter>
             <ToastContainer
                 position="bottom-right"

@@ -1,5 +1,6 @@
 import { Route, Routes } from "react-router-dom";
 
+import AdminOnly from "./auth/AdminOnly";
 import MainLayout from "./components/layout/MainLayout";
 
 import SearchPage from "./pages/public/SearchPage";
@@ -14,7 +15,14 @@ function App() {
             <Route path="/" element={<MainLayout />}>
                 <Route index element={<SearchPage />} />
                 <Route path="products/:id" element={<ProductPage />} />
-                <Route path="stores" element={<StoresPage />} />
+                <Route
+                    path="stores"
+                    element={
+                        <AdminOnly>
+                            <StoresPage />
+                        </AdminOnly>
+                    }
+                />
                 <Route path="*" element={<NotFoundPage />} />
             </Route>
         </Routes>
