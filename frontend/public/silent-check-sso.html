@@ -1,0 +1,9 @@
+<!doctype html>
+<html>
+    <body>
+        <!-- Keycloak opens this page in a hidden frame to check the login without leaving the site -->
+        <script>
+            parent.postMessage(location.href, location.origin);
+        </script>
+    </body>
+</html>

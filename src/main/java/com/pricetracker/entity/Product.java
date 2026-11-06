@@ -9,6 +9,8 @@ import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.LocalDateTime;
+import java.util.HashSet;
+import java.util.Set;
 
 // The canonical product, e.g. Sony WH-1000XM5. Per-store prices live in Offer.
 @Entity
@@ -38,6 +40,13 @@ public class Product {
     // Barcode. Not every store shows it, so it can be null.
     @Column(unique = true, length = 20)
     private String ean;
+
+    // Every barcode the stores showed for this product: one product can have several, e.g. one per region
+    @ElementCollection
+    @CollectionTable(name = "product_eans", joinColumns = @JoinColumn(name = "product_id"),
+            indexes = @Index(name = "idx_product_eans_ean", columnList = "ean"))
+    @Column(name = "ean", nullable = false, length = 20)
+    private Set<String> eans = new HashSet<>();
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "category_id")
