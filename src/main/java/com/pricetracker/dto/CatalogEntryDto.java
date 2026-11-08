@@ -5,6 +5,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 // A search result from a store's catalog
 @Data
@@ -22,8 +23,8 @@ public class CatalogEntryDto {
     // false = we have no fresh price yet, the page must be opened with /api/catalog/check
     private boolean checked;
 
-    // Known after the page was opened once; results with the same EAN or model key are the same product
-    private String ean;
+    // Known after the page was opened once; results with a shared EAN or the same model key are the same product
+    private List<String> eans;
     private String brand;
     // Normalized brand + model code, e.g. "logitech:910006138"
     private String modelKey;

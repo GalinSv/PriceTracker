@@ -14,6 +14,12 @@ export async function importOffer(url: string) {
     return response.data.data;
 }
 
+// Every store link of one product block becomes an offer of the same product
+export async function importGroup(urls: string[]) {
+    const response = await axiosInstance.post<ApiResponse<ProductDetails>>("/offers/import-group", { urls });
+    return response.data.data;
+}
+
 export async function getOfferHistory(offerId: number) {
     const response = await axiosInstance.get<ApiResponse<PriceSnapshot[]>>(`/offers/${offerId}/history`);
     return response.data.data;

@@ -111,3 +111,28 @@ export type RefreshResult = {
     notFound: number;
     failed: number;
 };
+
+export type Favorite = {
+    productId: number;
+    name: string;
+    brand: string | null;
+    imageUrl: string | null;
+    // null when no store has it in stock
+    lowestPrice: number | null;
+    priceWhenAdded: number | null;
+    // The lowest price at the last visit of the favorites page
+    seenPrice: number | null;
+    targetPrice: number | null;
+    targetReached: boolean;
+    inStockCount: number;
+    offerCount: number;
+    // Stores added after the last visit
+    newStores: string[];
+    news: boolean;
+    addedAt: string;
+};
+
+export type FavoritesSummary = {
+    productIds: number[];
+    newsCount: number;
+};

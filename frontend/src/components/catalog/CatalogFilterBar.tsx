@@ -1,7 +1,4 @@
-import type { ReactNode } from "react";
-
 import {
-    Box,
     Button,
     Card,
     Checkbox,
@@ -25,8 +22,6 @@ type Props = {
     stores: StoreCatalog[];
     // Brands, series, memory and colors of all results, with counts; null while unknown
     facets: CatalogFacets | null;
-    // Shown at the right end of the bar, e.g. "Load all results"
-    action?: ReactNode;
 };
 
 const SORT_LABELS: Record<SortOrder, string> = {
@@ -95,7 +90,7 @@ function FacetSelect({ id, label, values, selected, onChange, width }: FacetSele
     );
 }
 
-function CatalogFilterBar({ filters, onChange, stores, facets, action }: Props) {
+function CatalogFilterBar({ filters, onChange, stores, facets }: Props) {
     const storeNames = new Map(stores.map((store) => [store.storeCode, store.storeName]));
     const memory = [...(facets?.memory ?? [])].sort((a, b) => gigabytes(a.value) - gigabytes(b.value));
     const hasFilters =
@@ -214,7 +209,6 @@ function CatalogFilterBar({ filters, onChange, stores, facets, action }: Props) 
             </FormControl>
 
             {hasFilters && <Button onClick={() => onChange(NO_FILTERS)}>Изчисти</Button>}
-            {action && <Box sx={{ ml: "auto" }}>{action}</Box>}
         </Card>
     );
 }

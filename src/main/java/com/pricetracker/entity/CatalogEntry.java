@@ -51,8 +51,9 @@ public class CatalogEntry {
     @Column(name = "in_stock")
     private Boolean inStock;
 
-    // For grouping the same product from different stores in a search
-    @Column(length = 20)
+    // For grouping the same product from different stores in a search.
+    // Comma-separated when the store lists several barcodes.
+    @Column(length = 200)
     private String ean;
 
     @Column(length = 100)
@@ -64,6 +65,19 @@ public class CatalogEntry {
 
     @Column(name = "image_url", length = 1000)
     private String imageUrl;
+
+    // Search filters guessed from the name when the catalog is updated, see FacetExtractor
+    @Column(name = "facet_brand", length = 100)
+    private String facetBrand;
+
+    @Column(name = "facet_series", length = 150)
+    private String facetSeries;
+
+    @Column(name = "facet_memory", length = 10)
+    private String facetMemory;
+
+    @Column(name = "facet_color", length = 20)
+    private String facetColor;
 
     // When the page was last opened; null = never
     @Column(name = "checked_at")

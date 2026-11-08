@@ -13,4 +13,6 @@ import java.util.List;
 public class CatalogPageDto {
     private List<CatalogEntryDto> entries;
     private boolean hasMore;
+    // Only with the first page; null on the next ones
+    private CatalogFacetsDto facets;
 }

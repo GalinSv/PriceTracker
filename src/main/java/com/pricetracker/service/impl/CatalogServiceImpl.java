@@ -28,6 +28,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -40,6 +42,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -117,10 +121,13 @@ public class CatalogServiceImpl implements CatalogService {
 
     private final AtomicBoolean updating = new AtomicBoolean(false);
     private final ExecutorService background = Executors.newSingleThreadExecutor();
+    // For the filter counts of searches; more searches at once than threads just wait a little
+    private final ExecutorService facetCounting = Executors.newFixedThreadPool(4);
 
     @PreDestroy
     void stopBackgroundWork() {
         background.shutdownNow();
+        facetCounting.shutdownNow();
     }
 
     @Override
@@ -149,12 +156,26 @@ public class CatalogServiceImpl implements CatalogService {
         params.addAll(match.whereParams());
         params.addAll(match.orderParams());
 
+        // Both go through every link, so the filter counts run at the same time as the results
+        CompletableFuture<CatalogFacetsDto> facets = withFacets
+                ? CompletableFuture.supplyAsync(
+                        () -> countFacets(match, stores, Clause.in("e.facet_brand", chosen.getBrands())), facetCounting)
+                : CompletableFuture.completedFuture(null);
         List<CatalogEntryDto> found = jdbcTemplate.query(sql, this::toDto, params.toArray());
         boolean hasMore = found.size() > pageSize;
-        CatalogFacetsDto facets = withFacets
-                ? countFacets(match, stores, Clause.in("e.facet_brand", chosen.getBrands()))
-                : null;
-        return new CatalogPageDto(hasMore ? found.subList(0, pageSize) : found, hasMore, facets);
+        return new CatalogPageDto(hasMore ? found.subList(0, pageSize) : found, hasMore, join(facets));
+    }
+
+    // Throws the facet query's own exception instead of a CompletionException around it
+    private static <T> T join(CompletableFuture<T> future) {
+        try {
+            return future.join();
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof RuntimeException cause) {
+                throw cause;
+            }
+            throw e;
+        }
     }
 
     // The part of the query that finds the search words, shared by the results and the filter counts
@@ -180,9 +201,10 @@ public class CatalogServiceImpl implements CatalogService {
     }
 
     private WordMatch wordMatch(List<String> words) {
-        // Links with the words next to each other, e.g. "jbl flip 7", come before the rest
-        String phraseFirst = "(e.search_text LIKE ?) DESC";
-        List<Object> phrase = List.of("%" + String.join(" ", words) + "%");
+        List<Object> orderParams = new ArrayList<>();
+        String relevance = accessoriesLast(words, orderParams) + ", " + phraseFirst(words, orderParams)
+                // Then shorter links: "logitech g502 hero" before "case for logitech g502 hero black ..."
+                + ", length(e.search_text), e.url";
 
         if (words.size() <= MAX_REQUIRED_WORDS) {
             // Short searches: every word must be there
@@ -191,27 +213,116 @@ public class CatalogServiceImpl implements CatalogService {
             for (int i = 0; i < words.size(); i++) {
                 where.append(" AND ").append(wordCondition(words, i, whereParams));
             }
-            // Then shorter links: "logitech g502 hero" before "case for logitech g502 hero black ..."
-            return new WordMatch("", List.of(), where.toString(), whereParams,
-                    phraseFirst + ", length(e.search_text), e.url", phrase);
+            return new WordMatch("", List.of(), where.toString(), whereParams, relevance, orderParams);
         }
 
         // Longer searches, e.g. a name copied from a store, rarely match word for word.
         // Each word found gives points, a model code more, and half of all points is enough.
+        // The words before the first size name the model: "samsung galaxy s26 ultra" of
+        // "samsung galaxy s26 ultra 5g 256gb 12gb ram dual". Links with more of them come first, so a
+        // "galaxy s24 ultra 5g 256gb 12gb ram dual" can't pass an S26 Ultra whose store doesn't write "ram dual".
+        int nameWords = nameWordCount(words);
+        boolean nameFirst = nameWords > 0 && nameWords < words.size();
         StringBuilder score = new StringBuilder("(0");
+        StringBuilder nameScore = new StringBuilder("(0");
         List<Object> scoreParams = new ArrayList<>();
+        List<Object> nameParams = new ArrayList<>();
+        int[] weights = new int[words.size()];
         int maxScore = 0;
         for (int i = 0; i < words.size(); i++) {
             int weight = isModelCode(words.get(i)) ? MODEL_CODE_WEIGHT : 1;
+            weights[i] = weight;
             score.append(" + ").append(weight).append(" * (").append(wordCondition(words, i, scoreParams))
                     .append(")::int");
+            if (nameFirst && i < nameWords) {
+                nameScore.append(" + ").append(weight).append(" * (").append(wordCondition(words, i, nameParams))
+                        .append(")::int");
+            }
             maxScore += weight;
         }
         score.append(")");
+        nameScore.append(")");
+
+        String select = ", " + score + " AS score";
+        List<Object> selectParams = new ArrayList<>(scoreParams);
+        String orderBy = "score DESC, " + relevance;
+        if (nameFirst) {
+            select += ", " + nameScore + " AS name_score";
+            selectParams.addAll(nameParams);
+            orderBy = "name_score DESC, " + orderBy;
+        }
+        int threshold = (maxScore + 1) / 2;
         List<Object> whereParams = new ArrayList<>(scoreParams);
-        whereParams.add((maxScore + 1) / 2);
-        return new WordMatch(", " + score + " AS score", scoreParams, " AND " + score + " >= ?", whereParams,
-                "score DESC, " + phraseFirst + ", length(e.search_text), e.url", phrase);
+        whereParams.add(threshold);
+        String where = " AND " + score + " >= ?" + indexFilter(words, weights, threshold, whereParams);
+        return new WordMatch(select, selectParams, where, whereParams, orderBy, orderParams);
+    }
+
+    // Accessories after the product itself: links with "za" or "for" before the first search word, like
+    // "kalaf za samsung galaxy buds 4 pro" for "samsung galaxy buds 4 pro". They have all the words too,
+    // often word for word. A search that starts with the accessory ("kalaf za iphone 17") isn't affected,
+    // as its first word comes before the "za".
+    private String accessoriesLast(List<String> words, List<Object> params) {
+        String firstWord = " " + words.get(0);
+        params.add(firstWord);
+        params.add(firstWord);
+        return "(strpos(' ' || e.search_text || ' ', ' za ') BETWEEN 1 AND strpos(' ' || e.search_text, ?)"
+                + " OR strpos(' ' || e.search_text || ' ', ' for ') BETWEEN 1 AND strpos(' ' || e.search_text, ?)) ASC";
+    }
+
+    // Links with the words next to each other, e.g. "jbl flip 7", before the rest. Short words may be glued to
+    // the word before them, as most stores write "galaxy buds4 pro" for "galaxy buds 4 pro".
+    private String phraseFirst(List<String> words, List<Object> params) {
+        StringBuilder glued = new StringBuilder(words.get(0));
+        for (String word : words.subList(1, words.size())) {
+            glued.append(isShortWord(word) ? "" : " ").append(word);
+        }
+        List<String> phrases = List.of(String.join(" ", words), glued.toString()).stream().distinct().toList();
+        phrases.forEach(phrase -> params.add("%" + phrase + "%"));
+        return "(" + String.join(" OR ", Collections.nCopies(phrases.size(), "e.search_text LIKE ?")) + ") DESC";
+    }
+
+    // The points above have to be counted link by link, through all of them. A link with enough points must
+    // have at least one of the longest words, taken until the words left out are worth less than the
+    // threshold, and "has one of these words" can use the search index (db/catalog-search.sql) to skip the
+    // links that don't. It changes no result, only the speed. Words under 3 letters can't use the index, so if
+    // they alone could reach the threshold there is nothing to narrow down by.
+    private String indexFilter(List<String> words, int[] weights, int threshold, List<Object> params) {
+        List<Integer> longestFirst = new ArrayList<>();
+        for (int i = 0; i < words.size(); i++) {
+            if (words.get(i).length() >= 3) {
+                longestFirst.add(i);
+            }
+        }
+        longestFirst.sort(Comparator.comparingInt((Integer i) -> words.get(i).length()).reversed());
+
+        List<Object> anyOf = new ArrayList<>();
+        int leftOut = 0;
+        for (int weight : weights) {
+            leftOut += weight;
+        }
+        for (int i : longestFirst) {
+            if (leftOut < threshold) {
+                break;
+            }
+            anyOf.add("%" + words.get(i) + "%");
+            leftOut -= weights[i];
+        }
+        if (leftOut >= threshold) {
+            return "";
+        }
+        params.addAll(anyOf);
+        return " AND (" + String.join(" OR ", Collections.nCopies(anyOf.size(), "e.search_text LIKE ?")) + ")";
+    }
+
+    // How many words come before the first size like "5g", "256gb" or "144hz"; all of them if there is none
+    private int nameWordCount(List<String> words) {
+        for (int i = 0; i < words.size(); i++) {
+            if (NUMBER_WITH_UNIT.matcher(words.get(i)).matches()) {
+                return i;
+            }
+        }
+        return words.size();
     }
 
     // How many links of the search have each brand, series, memory and color. The other filters are left out,
@@ -272,8 +383,10 @@ public class CatalogServiceImpl implements CatalogService {
         }
         String gluedTo = index == 0 ? "" : "|" + words.get(index - 1);
         String after = Character.isDigit(word.charAt(0)) ? "([^0-9]|$)" : "([^a-z]|$)";
+        // The regex is slow on millions of links, so the cheap LIKE first skips links that don't have the word at all
+        params.add("%" + word + "%");
         params.add("(^| " + gluedTo + ")" + word + after);
-        return "e.search_text ~ ?";
+        return "(e.search_text LIKE ? AND e.search_text ~ ?)";
     }
 
     // One letter, or a number of up to three digits: "x", "7", "256"
@@ -584,8 +697,18 @@ public class CatalogServiceImpl implements CatalogService {
                 lastSegment = segment;
             }
         }
-        String text = title == null ? lastSegment : lastSegment + " " + title;
+        String words = decode(lastSegment).replaceFirst("(?i)\\.html?$", "");
+        String text = title == null ? words : words + " " + title;
         return TextUtils.truncate(String.join(" ", TextUtils.searchWords(text)), 1000);
+    }
+
+    // Some stores put Cyrillic in their links as %D0%BC..., which would otherwise become junk words
+    private String decode(String segment) {
+        try {
+            return URLDecoder.decode(segment, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return segment;
+        }
     }
 
     private String displayName(String searchText) {
