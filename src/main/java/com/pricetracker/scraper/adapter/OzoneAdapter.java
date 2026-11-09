@@ -48,7 +48,7 @@ public class OzoneAdapter implements StoreAdapter {
         // Rows of the "specifications" table
         product.setBrand(tableValue(page, "Марка"));
         product.setModelCode(tableValue(page, "Каталожен номер"));
-        product.setEan(tableValue(page, "Баркод"));
+        product.addEans(tableValue(page, "Баркод"));
 
         product.setPrice(PriceParser.parse(mainPriceText(page)));
         product.setCurrency("EUR");

@@ -37,7 +37,7 @@ public class UltraAdapter implements StoreAdapter {
 
         // Rows of the "specifications" table
         product.setBrand(tableValue(page, "Производител"));
-        product.setEan(tableValue(page, "EAN"));
+        product.addEans(tableValue(page, "EAN"));
 
         product.setPrice(PriceParser.parse(HtmlUtils.meta(page, "product:price:amount")));
         product.setCurrency(HtmlUtils.meta(page, "product:price:currency"));
