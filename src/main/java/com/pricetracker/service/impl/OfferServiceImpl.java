@@ -12,6 +12,7 @@ import com.pricetracker.enums.OfferStatus;
 import com.pricetracker.enums.StoreStatus;
 import com.pricetracker.exception.PageNotFoundException;
 import com.pricetracker.exception.ResourceNotFoundException;
+import com.pricetracker.exception.ScrapingException;
 import com.pricetracker.repository.OfferRepository;
 import com.pricetracker.repository.PriceSnapshotRepository;
 import com.pricetracker.repository.ProductRepository;
@@ -29,6 +30,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -54,6 +57,9 @@ public class OfferServiceImpl implements OfferService {
     private final TransactionTemplate transactionTemplate;
     private final ModelMapper modelMapper;
 
+    private static final int MAX_GROUP_SIZE = 30;
+    private static final int MAX_PARALLEL_PAGES = 10;
+
     private final AtomicBoolean refreshRunning = new AtomicBoolean(false);
 
     @Override
@@ -67,6 +73,94 @@ public class OfferServiceImpl implements OfferService {
             return offer.getProduct().getId();
         });
         return productService.getById(productId);
+    }
+
+    @Override
+    public ProductDetailsDto importGroup(List<String> urls) {
+        List<ScrapedProduct> found = scrapePages(urls);
+        Long productId = transactionTemplate.execute(status -> {
+            List<Offer> offers = offersFor(found);
+            // A store that is already tracked decides the product; otherwise the usual matching does
+            Product product = offers.stream().map(Offer::getProduct).filter(Objects::nonNull).findFirst()
+                    .orElseGet(() -> findOrCreateProduct(richest(found)));
+            attach(product, offers, found);
+            return product.getId();
+        });
+        return productService.getById(productId);
+    }
+
+    @Override
+    public int addOffers(Long productId, List<String> urls) {
+        List<ScrapedProduct> found = scrapePages(urls);
+        Integer added = transactionTemplate.execute(status -> {
+            Product product = productRepository.findById(productId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Product not found: " + productId));
+            List<Offer> offers = offersFor(found);
+            int newOffers = (int) offers.stream().filter(offer -> offer.getProduct() == null).count();
+            attach(product, offers, found);
+            return newOffers;
+        });
+        return added == null ? 0 : added;
+    }
+
+    private List<ScrapedProduct> scrapePages(List<String> urls) {
+        if (urls == null || urls.isEmpty() || urls.size() > MAX_GROUP_SIZE) {
+            throw new IllegalArgumentException("Give between 1 and " + MAX_GROUP_SIZE + " links");
+        }
+        // Two links can lead to the same page, so each page is kept once
+        Map<String, ScrapedProduct> pages = new LinkedHashMap<>();
+        scrapeAll(urls).forEach(page -> pages.putIfAbsent(page.getUrl(), page));
+        if (pages.isEmpty()) {
+            throw new ScrapingException("None of the store pages could be read");
+        }
+        return List.copyOf(pages.values());
+    }
+
+    private List<Offer> offersFor(List<ScrapedProduct> pages) {
+        return pages.stream()
+                .map(page -> offerRepository.findByUrl(page.getUrl()).orElseGet(() -> newOffer(page)))
+                .toList();
+    }
+
+    // Offers without a product join this one; offers of another product stay where they are
+    private void attach(Product product, List<Offer> offers, List<ScrapedProduct> pages) {
+        for (int i = 0; i < pages.size(); i++) {
+            Offer offer = offers.get(i);
+            if (offer.getProduct() == null) {
+                offer.setProduct(product);
+            }
+            applyScraped(offer, pages.get(i));
+        }
+    }
+
+    // Pages of different stores are read at the same time; the rate limiter still spaces out one store
+    private List<ScrapedProduct> scrapeAll(List<String> urls) {
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(urls.size(), MAX_PARALLEL_PAGES));
+        try {
+            List<CompletableFuture<ScrapedProduct>> pages = urls.stream()
+                    .map(url -> CompletableFuture.supplyAsync(() -> scrapeOrNull(url), pool))
+                    .toList();
+            return pages.stream().map(CompletableFuture::join).filter(Objects::nonNull).toList();
+        } finally {
+            pool.shutdown();
+        }
+    }
+
+    // A removed product or a store that is down should not stop the other stores
+    private ScrapedProduct scrapeOrNull(String url) {
+        try {
+            return scraperService.scrape(url);
+        } catch (RuntimeException e) {
+            log.info("Skipped {}: {}", url, e.getMessage());
+            return null;
+        }
+    }
+
+    // The page with an EAN and a model code is the best one to match the other stores against
+    private ScrapedProduct richest(List<ScrapedProduct> pages) {
+        return pages.stream()
+                .max(Comparator.comparingInt(page -> (page.getEans().isEmpty() ? 0 : 2) + (page.getModelCode() == null ? 0 : 1)))
+                .orElseThrow();
     }
 
     @Override
@@ -177,12 +271,12 @@ public class OfferServiceImpl implements OfferService {
     }
 
     // The same product in different stores becomes one Product:
-    // 1) same EAN (barcode) - the safest match
+    // 1) a shared EAN (barcode) - the safest match
     // 2) same brand + model code, e.g. Logitech + 910-005470
     // 3) otherwise it is a new product
     private Product findOrCreateProduct(ScrapedProduct scraped) {
-        if (scraped.getEan() != null) {
-            Optional<Product> byEan = productRepository.findByEan(scraped.getEan());
+        if (!scraped.getEans().isEmpty()) {
+            Optional<Product> byEan = productRepository.findByAnyEan(scraped.getEans()).stream().findFirst();
             if (byEan.isPresent()) {
                 return byEan.get();
             }
@@ -203,16 +297,17 @@ public class OfferServiceImpl implements OfferService {
         product.setName(TextUtils.truncate(scraped.getTitle(), 500));
         product.setBrand(TextUtils.truncate(scraped.getBrand(), 100));
         product.setModelCode(modelCode);
-        product.setEan(scraped.getEan());
         product.setImageUrl(TextUtils.truncate(scraped.getImageUrl(), 1000));
         return productRepository.save(product);
     }
 
     // A store that knows more (e.g. has the EAN) completes the product
     private void fillMissingProductData(Product product, ScrapedProduct scraped) {
-        if (product.getEan() == null && scraped.getEan() != null
-                && productRepository.findByEan(scraped.getEan()).isEmpty()) {
-            product.setEan(scraped.getEan());
+        // Every barcode a store shows helps to recognize the product in the next store
+        product.getEans().addAll(scraped.getEans());
+        if (product.getEan() == null && !scraped.getEans().isEmpty()
+                && productRepository.findByEan(scraped.getEans().get(0)).isEmpty()) {
+            product.setEan(scraped.getEans().get(0));
         }
         if (product.getModelCode() == null) {
             product.setModelCode(TextUtils.normalizeModelCode(scraped.getModelCode()));

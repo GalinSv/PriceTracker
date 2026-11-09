@@ -15,6 +15,9 @@ public interface OfferRepository extends JpaRepository<Offer, Long> {
 
     List<Offer> findByProductIdIn(Collection<Long> productIds);
 
+    @EntityGraph(attributePaths = "store")
+    List<Offer> findWithStoreByProductIdIn(Collection<Long> productIds);
+
     Optional<Offer> findByUrl(String url);
 
     // Loads the store together with the offer, because the refresh reads it outside a transaction
