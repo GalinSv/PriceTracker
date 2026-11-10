@@ -21,13 +21,15 @@ public final class TextUtils {
     private TextUtils() {
     }
 
-    // "DGS-1008D", "dgs 1008d" and "DGS1008D" all become "DGS1008D", so stores can be compared
+    // "DGS-1008D", "dgs 1008d" and "DGS1008D" all become "DGS1008D", so stores can be compared.
+    // A code without a digit ("PRO-X", "BLUE", "NULL") is a series or a word, not a model code:
+    // GPlay's "PRO-X" is both a mouse and a headset, so it would join different products.
     public static String normalizeModelCode(String code) {
         if (code == null) {
             return null;
         }
         String normalized = code.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "");
-        return normalized.isEmpty() ? null : truncate(normalized, 100);
+        return normalized.chars().anyMatch(Character::isDigit) ? truncate(normalized, 100) : null;
     }
 
 

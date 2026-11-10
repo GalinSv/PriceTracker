@@ -33,9 +33,20 @@ public class WatchlistItem {
     @JoinColumn(name = "product_id", nullable = false)
     private Product product;
 
-    // Optional: notify the user when the price drops below this
+    // Optional: the product is marked when its lowest price drops to this or below
     @Column(name = "target_price", precision = 12, scale = 2)
     private BigDecimal targetPrice;
+
+    // The lowest price on the day the product was added
+    @Column(name = "price_when_added", precision = 12, scale = 2)
+    private BigDecimal priceWhenAdded;
+
+    // The lowest price and the time the user last opened the favorites page; changes after it are news
+    @Column(name = "seen_price", precision = 12, scale = 2)
+    private BigDecimal seenPrice;
+
+    @Column(name = "seen_at")
+    private LocalDateTime seenAt;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
