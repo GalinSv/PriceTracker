@@ -14,6 +14,7 @@ import {
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import StorefrontIcon from "@mui/icons-material/Storefront";
 
+import FavoriteButton from "../../components/favorites/FavoriteButton";
 import OffersTable from "../../components/product/OffersTable";
 import PriceHistoryChart from "../../components/product/PriceHistoryChart";
 import ProductImage from "../../components/product/ProductImage";
@@ -125,6 +126,9 @@ function ProductPage() {
                         в наличност в {storesInStock} от {product.offers.length}{" "}
                         {product.offers.length === 1 ? "магазин" : "магазина"}
                     </Typography>
+                    <Box sx={{ mt: 2 }}>
+                        <FavoriteButton productId={product.id} withLabel />
+                    </Box>
                 </Box>
             </Box>
 

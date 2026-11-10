@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
@@ -18,6 +19,8 @@ import {
     Typography,
 } from "@mui/material";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import ExpandLessIcon from "@mui/icons-material/ExpandLess";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 
@@ -25,6 +28,7 @@ import type { CatalogEntry } from "../../types/api";
 import { isAvailable } from "../../utils/catalogGroups";
 import type { ProductGroup } from "../../utils/catalogGroups";
 import { formatPrice } from "../../utils/format";
+import FavoriteButton from "../favorites/FavoriteButton";
 import ProductImage from "../product/ProductImage";
 
 type Props = {
@@ -34,6 +38,8 @@ type Props = {
     // Opens the product page with all its stores
     onOpen: (group: ProductGroup) => void;
     opening: boolean;
+    // Makes the block's links one product and gives its id
+    toProduct: (group: ProductGroup) => Promise<number>;
 };
 
 function StockStatus({ entry }: { entry: CatalogEntry }) {
@@ -56,11 +62,28 @@ function StockStatus({ entry }: { entry: CatalogEntry }) {
 }
 
 // A search result shown like the product page: the product on top, its stores below, cheapest first
-function ProductGroupCard({ group, importingUrl, onTrack, onOpen, opening }: Props) {
-    const storeCount = group.entries.length;
+function ProductGroupCard({ group, importingUrl, onTrack, onOpen, opening, toProduct }: Props) {
+    const [showUnavailable, setShowUnavailable] = useState(false);
+
+    // One row per store: some stores list the same product under several links.
+    // The entries are in stock and cheapest first, so the first link of a store is its best offer.
+    const seenStores = new Set<string>();
+    const rows = group.entries.filter((entry) => {
+        if (seenStores.has(entry.storeCode)) return false;
+        seenStores.add(entry.storeCode);
+        return true;
+    });
+    const available = rows.filter(isAvailable);
+    // A product in stock somewhere shows only those stores; the rest open on request
+    const unavailable = available.length > 0 ? rows.filter((entry) => !isAvailable(entry)) : [];
+    const shownRows = available.length > 0 && !showUnavailable ? available : rows;
 
     return (
-        <Card>
+        <Card sx={{ position: "relative" }}>
+            {/* Outside the clickable header: a button can't be inside another button */}
+            <Box sx={{ position: "absolute", top: 8, right: 8, zIndex: 1 }}>
+                <FavoriteButton productId={group.productId} resolveProductId={() => toProduct(group)} />
+            </Box>
             <CardActionArea
                 onClick={() => onOpen(group)}
                 disabled={opening}
@@ -69,7 +92,7 @@ function ProductGroupCard({ group, importingUrl, onTrack, onOpen, opening }: Pro
                 <Box sx={{ width: { xs: 88, sm: 120 }, flexShrink: 0 }}>
                     <ProductImage src={group.imageUrl} alt={group.name} height={110} />
                 </Box>
-                <Box sx={{ minWidth: 0, flex: 1 }}>
+                <Box sx={{ minWidth: 0, flex: 1, pr: { xs: 4, sm: 0 } }}>
                     {group.brand && (
                         <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
                             {group.brand}
@@ -80,7 +103,7 @@ function ProductGroupCard({ group, importingUrl, onTrack, onOpen, opening }: Pro
                         {group.lowestPrice != null ? `от ${formatPrice(group.lowestPrice)}` : "Няма наличност"}
                     </Typography>
                     <Typography variant="body2" color="text.secondary">
-                        в наличност в {group.inStockCount} от {storeCount} {storeCount === 1 ? "магазин" : "магазина"}
+                        в наличност в {available.length} от {rows.length} {rows.length === 1 ? "магазин" : "магазина"}
                     </Typography>
                 </Box>
                 <Box
@@ -102,7 +125,7 @@ function ProductGroupCard({ group, importingUrl, onTrack, onOpen, opening }: Pro
             <TableContainer>
                 <Table size="small">
                     <TableBody>
-                        {group.entries.map((entry) => {
+                        {shownRows.map((entry) => {
                             const isLowest = isAvailable(entry) && entry.price === group.lowestPrice;
                             return (
                                 <TableRow
@@ -173,6 +196,19 @@ function ProductGroupCard({ group, importingUrl, onTrack, onOpen, opening }: Pro
                     </TableBody>
                 </Table>
             </TableContainer>
+            {unavailable.length > 0 && (
+                <Box sx={{ px: 1, py: 0.5, borderTop: 1, borderColor: "divider" }}>
+                    <Button
+                        size="small"
+                        endIcon={showUnavailable ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                        onClick={() => setShowUnavailable((shown) => !shown)}
+                    >
+                        {showUnavailable
+                            ? "Скрий магазините без наличност"
+                            : `Още ${unavailable.length} ${unavailable.length === 1 ? "магазин" : "магазина"} без наличност`}
+                    </Button>
+                </Box>
+            )}
         </Card>
     );
 }

@@ -9,6 +9,7 @@ import com.pricetracker.exception.ResourceNotFoundException;
 import com.pricetracker.repository.OfferRepository;
 import com.pricetracker.repository.ProductRepository;
 import com.pricetracker.service.ProductService;
+import com.pricetracker.util.OfferPrices;
 import com.pricetracker.util.TextUtils;
 import jakarta.persistence.criteria.Predicate;
 import lombok.RequiredArgsConstructor;
@@ -19,9 +20,7 @@ import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -65,7 +64,7 @@ public class ProductServiceImpl implements ProductService {
                 .map(product -> {
                     List<Offer> offers = offersByProduct.getOrDefault(product.getId(), List.of());
                     ProductDto dto = modelMapper.map(product, ProductDto.class);
-                    dto.setLowestPrice(lowestInStockPrice(offers));
+                    dto.setLowestPrice(OfferPrices.lowestInStock(offers));
                     dto.setOfferCount(offers.size());
                     return dto;
                 })
@@ -82,7 +81,7 @@ public class ProductServiceImpl implements ProductService {
         dto.setOffers(offers.stream()
                 .map(offer -> modelMapper.map(offer, OfferDto.class))
                 .toList());
-        dto.setLowestPrice(lowestInStockPrice(offers));
+        dto.setLowestPrice(OfferPrices.lowestInStock(offers));
         return dto;
     }
 
@@ -98,14 +97,5 @@ public class ProductServiceImpl implements ProductService {
             }
             return cb.or(inName, inBrand, cb.like(root.get("modelCode"), "%" + modelCode + "%"));
         };
-    }
-
-    private BigDecimal lowestInStockPrice(List<Offer> offers) {
-        return offers.stream()
-                .filter(offer -> Boolean.TRUE.equals(offer.getInStock()))
-                .map(Offer::getCurrentPrice)
-                .filter(price -> price != null)
-                .min(Comparator.naturalOrder())
-                .orElse(null);
     }
 }
