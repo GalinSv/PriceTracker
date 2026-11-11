@@ -51,6 +51,10 @@ public class CatalogEntry {
     @Column(name = "in_stock")
     private Boolean inStock;
 
+    // In stock, but the store brings it for each order; null for links checked before this was read
+    @Column(name = "on_order")
+    private Boolean onOrder;
+
     // For grouping the same product from different stores in a search.
     // Comma-separated when the store lists several barcodes.
     @Column(length = 200)
@@ -78,6 +82,16 @@ public class CatalogEntry {
 
     @Column(name = "facet_color", length = 20)
     private String facetColor;
+
+    // Set when an admin moves this link into another product in the search: the link it was put with.
+    // The search then shows the two as one product.
+    @Column(name = "joined_to_url", length = 1000)
+    private String joinedToUrl;
+
+    // When the store answered that the page doesn't exist (a removed product). Such links are left out of the
+    // search for a week, see CatalogServiceImpl.SHOWN; a store's sitemap often keeps listing them for a while.
+    @Column(name = "gone_at")
+    private LocalDateTime goneAt;
 
     // When the page was last opened; null = never
     @Column(name = "checked_at")

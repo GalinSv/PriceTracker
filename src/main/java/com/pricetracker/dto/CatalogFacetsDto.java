@@ -15,6 +15,8 @@ public class CatalogFacetsDto {
     private List<FacetValue> series;
     private List<FacetValue> memory;
     private List<FacetValue> colors;
+    // All the links of the search with the chosen filters, also those after the first page
+    private long total;
 
     @Data
     @NoArgsConstructor

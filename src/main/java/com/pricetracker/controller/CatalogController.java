@@ -5,11 +5,13 @@ import com.pricetracker.dto.CatalogEntryDto;
 import com.pricetracker.dto.CatalogFiltersDto;
 import com.pricetracker.dto.CatalogPageDto;
 import com.pricetracker.dto.CatalogStatusDto;
+import com.pricetracker.dto.JoinLinksRequest;
 import com.pricetracker.service.CatalogService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -35,6 +37,19 @@ public class CatalogController {
     @PostMapping("/check")
     public ResponseEntity<ApiResponse<CatalogEntryDto>> check(@RequestParam String url) {
         return ResponseEntity.ok(ApiResponse.ok(catalogService.check(url)));
+    }
+
+    // Admins only: two products of the search are one. Returns the link the moved ones were put with.
+    @PostMapping("/join")
+    public ResponseEntity<ApiResponse<String>> join(@RequestBody JoinLinksRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(catalogService.join(request.getUrls(), request.getTargetUrls())));
+    }
+
+    // Admins only: takes back a join
+    @PostMapping("/separate")
+    public ResponseEntity<ApiResponse<Void>> separate(@RequestBody JoinLinksRequest request) {
+        catalogService.separate(request.getUrls());
+        return ResponseEntity.ok(ApiResponse.ok(null));
     }
 
     @GetMapping("/status")
