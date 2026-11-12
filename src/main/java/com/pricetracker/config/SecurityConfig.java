@@ -30,7 +30,7 @@ public class SecurityConfig {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.POST, "/api/catalog/update", "/api/catalog/facets",
-                                "/api/offers/refresh").hasRole("admin")
+                                "/api/catalog/join", "/api/catalog/separate", "/api/offers/refresh").hasRole("admin")
                         .requestMatchers("/api/favorites/**").authenticated()
                         .anyRequest().permitAll())
                 .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> jwt.jwtAuthenticationConverter(keycloakRoles())));

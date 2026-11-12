@@ -2,6 +2,7 @@ package com.pricetracker.service.impl;
 
 import com.pricetracker.entity.Store;
 import com.pricetracker.enums.StoreStatus;
+import com.pricetracker.exception.NoPriceException;
 import com.pricetracker.exception.ScrapingException;
 import com.pricetracker.repository.StoreRepository;
 import com.pricetracker.scraper.PageFetcher;
@@ -42,6 +43,9 @@ public class ScraperServiceImpl implements ScraperService {
 
         if (product.getTitle() == null || product.getPrice() == null) {
             throw new ScrapingException("Could not read the name or the price from " + uri);
+        }
+        if (product.getPrice().signum() <= 0) {
+            throw new NoPriceException("The store shows no price for " + uri);
         }
         product.setStoreCode(store.getCode());
         product.setUrl(canonicalUrl(page, uri));

@@ -58,6 +58,10 @@ public class Offer {
     @Column(name = "in_stock", nullable = false)
     private Boolean inStock = true;
 
+    // In stock, but the store brings it for each order; null for offers checked before this was read
+    @Column(name = "on_order")
+    private Boolean onOrder;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private OfferSource source = OfferSource.SCRAPER;

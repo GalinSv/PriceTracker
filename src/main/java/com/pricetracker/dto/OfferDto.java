@@ -20,5 +20,6 @@ public class OfferDto {
     private BigDecimal currentPrice;
     private String currency;
     private Boolean inStock;
+    private Boolean onOrder;
     private LocalDateTime lastCheckedAt;
 }

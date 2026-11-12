@@ -10,6 +10,7 @@ import com.pricetracker.entity.Store;
 import com.pricetracker.enums.OfferSource;
 import com.pricetracker.enums.OfferStatus;
 import com.pricetracker.enums.StoreStatus;
+import com.pricetracker.exception.NoPriceException;
 import com.pricetracker.exception.PageNotFoundException;
 import com.pricetracker.exception.ResourceNotFoundException;
 import com.pricetracker.exception.ScrapingException;
@@ -217,6 +218,12 @@ public class OfferServiceImpl implements OfferService {
         } catch (PageNotFoundException e) {
             counters.notFound.incrementAndGet();
             markFailed(offer.getId(), OfferStatus.NOT_FOUND, null);
+        } catch (NoPriceException e) {
+            Boolean changed = transactionTemplate.execute(status ->
+                    markSoldOut(offerRepository.findById(offer.getId()).orElseThrow()));
+            if (Boolean.TRUE.equals(changed)) {
+                counters.changed.incrementAndGet();
+            }
         } catch (RuntimeException e) {
             counters.failed.incrementAndGet();
             log.warn("Could not refresh offer {}: {}", offer.getId(), e.getMessage());
@@ -232,6 +239,22 @@ public class OfferServiceImpl implements OfferService {
                 offer.getStore().setLastError(TextUtils.truncate(error, 1000));
             }
         }));
+    }
+
+    // The store zeroed the price: the offer keeps its last real price and is no longer in stock.
+    // Returns true if it was in stock until now (and a history row was saved).
+    private boolean markSoldOut(Offer offer) {
+        boolean changed = !Boolean.FALSE.equals(offer.getInStock());
+        offer.setInStock(false);
+        offer.setOnOrder(false);
+        offer.setStatus(OfferStatus.ACTIVE);
+        offer.setLastCheckedAt(LocalDateTime.now());
+        offerRepository.save(offer);
+        if (changed) {
+            priceSnapshotRepository.save(snapshotOf(offer));
+        }
+        offer.getStore().setLastSuccessAt(LocalDateTime.now());
+        return changed;
     }
 
     // Returns true if the price or the stock changed (and a history row was saved)
@@ -250,6 +273,7 @@ public class OfferServiceImpl implements OfferService {
         offer.setCurrentPrice(scraped.getPrice());
         offer.setCurrency(scraped.getCurrency());
         offer.setInStock(scraped.getInStock());
+        offer.setOnOrder(scraped.isOnOrder());
         offer.setStatus(OfferStatus.ACTIVE);
         offer.setLastCheckedAt(LocalDateTime.now());
         offerRepository.save(offer);

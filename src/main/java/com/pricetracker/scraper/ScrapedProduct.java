@@ -28,6 +28,8 @@ public class ScrapedProduct {
     private BigDecimal price;
     private String currency;
     private Boolean inStock;
+    // In stock, but the store first has to bring it: shown as "По поръчка"
+    private boolean onOrder;
     private String imageUrl;
 
     // "195950639049, 195950639094" -> both barcodes
