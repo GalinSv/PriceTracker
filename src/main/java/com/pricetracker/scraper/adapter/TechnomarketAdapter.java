@@ -1,6 +1,5 @@
 package com.pricetracker.scraper.adapter;
 
-import com.pricetracker.scraper.HtmlUtils;
 import com.pricetracker.scraper.JsonLdParser;
 import com.pricetracker.scraper.JsonLdStoreAdapter;
 import com.pricetracker.scraper.ScrapedProduct;
@@ -42,7 +41,7 @@ public class TechnomarketAdapter extends JsonLdStoreAdapter {
     protected void customize(Document page, ScrapedProduct product) {
         Element widget = page.selectFirst("tm-pointandplace[ean]");
         if (widget != null) {
-            product.setEan(HtmlUtils.blankToNull(widget.attr("ean")));
+            product.addEans(widget.attr("ean"));
         }
 
         // Pages of removed products are still there, with price 0

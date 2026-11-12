@@ -17,9 +17,10 @@ import {
     Typography,
 } from "@mui/material";
 import CloudSyncIcon from "@mui/icons-material/CloudSync";
+import FilterListIcon from "@mui/icons-material/FilterList";
 import RefreshIcon from "@mui/icons-material/Refresh";
 
-import { getCatalogStatus, updateCatalog } from "../../services/catalogService";
+import { getCatalogStatus, refreshCatalogFilters, updateCatalog } from "../../services/catalogService";
 import { refreshPrices } from "../../services/offerService";
 import { getStores } from "../../services/storeService";
 import type { CatalogStatus, Store, StoreStatus } from "../../types/api";
@@ -83,6 +84,16 @@ function StoresPage() {
         }
     }
 
+    async function handleRefreshFilters() {
+        try {
+            await refreshCatalogFilters();
+            notify.info("Филтрите се обновяват. Това отнема около минута.");
+            setCatalog((current) => (current ? { ...current, updating: true } : current));
+        } catch (error) {
+            notify.error(error, "Обновяването на филтрите не можа да започне");
+        }
+    }
+
     const catalogByStore = new Map(catalog?.stores.map((entry) => [entry.storeCode, entry]) ?? []);
 
     return (
@@ -96,7 +107,15 @@ function StoresPage() {
                         Цените се обновяват автоматично на всеки 6 часа, а каталозите веднъж на ден.
                     </Typography>
                 </Box>
-                <Box sx={{ display: "flex", gap: 1 }}>
+                <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                    <Button
+                        variant="outlined"
+                        startIcon={<FilterListIcon />}
+                        onClick={handleRefreshFilters}
+                        disabled={catalogUpdating}
+                    >
+                        Обнови филтрите
+                    </Button>
                     <Button
                         variant="outlined"
                         startIcon={<CloudSyncIcon />}
@@ -114,7 +133,7 @@ function StoresPage() {
             {catalogUpdating && (
                 <Card sx={{ mb: 3 }}>
                     <CardContent>
-                        <Typography sx={{ mb: 1 }}>Каталозите се обновяват...</Typography>
+                        <Typography sx={{ mb: 1 }}>Каталозите или филтрите се обновяват...</Typography>
                         <LinearProgress />
                     </CardContent>
                 </Card>
