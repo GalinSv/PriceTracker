@@ -27,11 +27,12 @@ public final class FacetExtractor {
     // The words after these name the device an accessory is for: "калъф за Samsung"
     private static final Set<String> FOR_WORDS = Set.of("za", "for");
     private static final int MAX_BRAND_WORDS = 3;
-    private static final int MAX_SERIES_WORDS = 4;
+    private static final int MAX_SERIES_WORDS = 5;
     private static final int MIN_MODEL_CODE_LENGTH = 6;
-    // "pro", "max": they belong to the series name, "Galaxy S26 Ultra", "iPhone 17 Pro Max"
+    // "pro", "max": they belong to the series name, "Galaxy S26 Ultra", "iPhone 17 Pro Max".
+    // Also the lines inside a line: "Galaxy Z Fold 7", "Galaxy Tab S10 FE", "Redmi Note 14 Pro", "Galaxy Buds 4".
     private static final Set<String> SERIES_WORDS = Set.of("pro", "max", "ultra", "plus", "mini", "lite", "x", "se",
-            "fe", "air", "neo", "edge", "slim", "fold", "flip", "s", "e");
+            "fe", "air", "neo", "edge", "slim", "fold", "flip", "s", "e", "z", "tab", "note", "buds", "watch", "xl");
     // Words that are a product type, not a series: "Logitech mouse", "JBL bluetooth speaker"
     private static final Set<String> NOT_SERIES = Set.of("mishka", "klaviatura", "slushalki", "kalaf", "kabel",
             "zaryadno", "tonkolona", "kolonka", "laptop", "telefon", "smartfon", "monitor", "televizor", "printer",
@@ -40,8 +41,19 @@ public final class FacetExtractor {
             "portativen", "bezzhichna", "bezzhichen", "bezzhichni", "html", "za", "for", "s", "i", "and", "with");
     // 256gb, 1tb, also "512 gb"
     private static final Pattern CAPACITY = Pattern.compile("(\\d{1,4})(gb|tb)");
+    // RAM and storage glued in a link: "8256gb" is 8/256 GB, "161tb" is 16 GB/1 TB
+    private static final Pattern RAM_AND_CAPACITY =
+            Pattern.compile("(?:4|6|8|12|16|24)((?:64|128|256|512)gb)|(?:8|12|16|24)([12]tb)");
     // 5g, 144hz, 35k, 65w: sizes and units end a series name
     private static final Pattern NUMBER_WITH_UNIT = Pattern.compile("\\d+[a-z]{1,3}");
+    // "s948", "a566b", "ga403": the maker's code of a model, which some stores write after or before its name
+    private static final Pattern SHORT_MODEL_CODE = Pattern.compile("[a-z]{1,2}\\d{3,}[a-z]*");
+    // Samsung's codes start with it: "Samsung SM-S948B Galaxy S26 Ultra"
+    private static final Set<String> MODEL_CODE_PREFIXES = Set.of("sm");
+    private static final Set<String> CAPACITY_UNITS = Set.of("gb", "tb");
+    // In GB. Not 11 or 13: "iPad Air 11 256GB" names the 11 inch one.
+    private static final Set<String> RAM_SIZES = Set.of("2", "3", "4", "6", "8", "12", "16", "18", "24", "32", "48",
+            "64");
     // "flip7", "rtx4060": a word glued to its number
     private static final Pattern GLUED_NUMBER = Pattern.compile("([a-z]{3,})(\\d+)");
     private static final Map<String, String> COLORS = colors();
@@ -99,14 +111,21 @@ public final class FacetExtractor {
     // The words after the brand: the line name, then numbers and words like "pro": "Galaxy S26 Ultra"
     private String series(String brand, String[] words, int from) {
         List<String> series = new ArrayList<>();
-        for (int i = from; i < words.length && series.size() < MAX_SERIES_WORDS; i++) {
+        // The name already has its number: "s26" of "galaxy s26 ultra"
+        boolean numbered = false;
+        for (int i = afterModelCode(words, from); i < words.length && series.size() < MAX_SERIES_WORDS; i++) {
             String word = words[i];
-            if (endsSeries(word)) {
+            if (endsSeries(word) || isSizeNumber(words, i, numbered)) {
+                break;
+            }
+            // "galaxy s26 ultra s948": the code after the name. "g502" alone is the name itself.
+            if (numbered && SHORT_MODEL_CODE.matcher(word).matches()) {
                 break;
             }
             boolean hasDigit = word.chars().anyMatch(Character::isDigit);
             if (series.isEmpty() || hasDigit || SERIES_WORDS.contains(word)) {
                 series.add(word);
+                numbered |= hasDigit;
             } else {
                 break;
             }
@@ -128,6 +147,30 @@ public final class FacetExtractor {
         return TextUtils.truncate(brand + " " + String.join(" ", parts), 150);
     }
 
+    // "sm s948b galaxy s26 ultra": the name starts after the code
+    private int afterModelCode(String[] words, int from) {
+        boolean codeFirst = from + 2 < words.length && MODEL_CODE_PREFIXES.contains(words[from])
+                && SHORT_MODEL_CODE.matcher(words[from + 1]).matches()
+                && words[from + 2].chars().allMatch(Character::isLetter);
+        return codeFirst ? from + 2 : from;
+    }
+
+    // A number that is a size, not a part of the name: the "12" of "12 gb", and after the name's own number
+    // also the RAM of "s26 ultra 12 256gb" (stores write "12/256GB"). The "17" of "iphone 17 256gb" stays.
+    private boolean isSizeNumber(String[] words, int i, boolean numbered) {
+        if (!words[i].chars().allMatch(Character::isDigit) || i + 1 >= words.length) {
+            return false;
+        }
+        String next = words[i + 1];
+        if (CAPACITY_UNITS.contains(next)) {
+            return true;
+        }
+        boolean beforeSize = CAPACITY.matcher(next).matches()
+                || (next.chars().allMatch(Character::isDigit) && i + 2 < words.length
+                && CAPACITY_UNITS.contains(words[i + 2]));
+        return numbered && beforeSize && RAM_SIZES.contains(words[i]);
+    }
+
     private boolean endsSeries(String word) {
         boolean digitsOnly = word.chars().allMatch(Character::isDigit);
         boolean hasDigit = word.chars().anyMatch(Character::isDigit);
@@ -146,6 +189,10 @@ public final class FacetExtractor {
             if (i + 1 < words.length && word.chars().allMatch(Character::isDigit)
                     && (words[i + 1].equals("gb") || words[i + 1].equals("tb"))) {
                 word = word + words[i + 1];
+            }
+            Matcher glued = RAM_AND_CAPACITY.matcher(word);
+            if (glued.matches()) {
+                word = glued.group(1) != null ? glued.group(1) : glued.group(2);
             }
             Matcher matcher = CAPACITY.matcher(word);
             if (!matcher.matches()) {

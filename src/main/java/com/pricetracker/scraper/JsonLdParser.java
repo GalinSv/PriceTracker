@@ -52,7 +52,8 @@ public class JsonLdParser {
         }
         result.setPrice(PriceParser.parse(firstText(offer, "price", "lowPrice")));
         result.setCurrency(text(offer, "priceCurrency"));
-        result.setInStock(isInStock(text(offer, "availability")));
+        result.setInStock(Availability.isInStock(text(offer, "availability")));
+        result.setOnOrder(Availability.isOnOrder(text(offer, "availability")));
         return result;
     }
 
@@ -103,16 +104,6 @@ public class JsonLdParser {
             return firstText(node, "url", "contentUrl");
         }
         return clean(node);
-    }
-
-    private Boolean isInStock(String availability) {
-        if (availability == null) {
-            return null;
-        }
-        return availability.endsWith("InStock")
-                || availability.endsWith("LimitedAvailability")
-                || availability.endsWith("OnlineOnly")
-                || availability.endsWith("InStoreOnly");
     }
 
     private String firstText(JsonNode node, String... fields) {

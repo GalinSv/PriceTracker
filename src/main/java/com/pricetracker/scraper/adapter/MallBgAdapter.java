@@ -4,6 +4,7 @@ import com.pricetracker.scraper.HtmlUtils;
 import com.pricetracker.scraper.MicrodataStoreAdapter;
 import com.pricetracker.scraper.ScrapedProduct;
 import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
 import org.springframework.stereotype.Component;
 
 // MallBG has microdata for name, brand and price; the stock is only in <meta property="product:availability">
@@ -35,5 +36,12 @@ public class MallBgAdapter extends MicrodataStoreAdapter {
         if (product.getBrand() == null) {
             product.setBrand(HtmlUtils.meta(page, "product:brand"));
         }
+        // The barcode is only in the visible list under the name: <li>EAN: 4548736143487</li>.
+        // MallBG has one listing per supplier, with different names, so the barcode is what joins them.
+        page.select("li").stream()
+                .map(Element::ownText)
+                .filter(text -> text.trim().startsWith("EAN:"))
+                .findFirst()
+                .ifPresent(product::addEans);
     }
 }

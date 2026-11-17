@@ -7,6 +7,7 @@ import com.pricetracker.dto.CatalogPageDto;
 import com.pricetracker.dto.CatalogStatusDto;
 import com.pricetracker.entity.Store;
 import com.pricetracker.enums.StoreStatus;
+import com.pricetracker.exception.PageNotFoundException;
 import com.pricetracker.exception.ResourceNotFoundException;
 import com.pricetracker.exception.ScrapingException;
 import com.pricetracker.repository.CatalogEntryRepository;
@@ -23,9 +24,11 @@ import com.pricetracker.util.TextUtils;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.jsoup.nodes.Document;
 import org.jsoup.parser.Parser;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.net.URLDecoder;
@@ -36,12 +39,17 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -77,10 +85,16 @@ public class CatalogServiceImpl implements CatalogService {
     private static final int MAX_PAGE_SIZE = 300;
     private static final int MAX_EANS = 10;
     private static final int MAX_FACET_VALUES = 40;
+    // Links of active stores, without the removed products. After a week a removed page is tried once more,
+    // in case the product came back.
+    private static final String SHOWN =
+            " WHERE s.status = 'ACTIVE' AND (e.gone_at IS NULL OR e.gone_at < now() - interval '7 days')";
     private static final int MAX_WORDS = 12;
     // Up to this many words, every word must be found; longer searches are scored
     private static final int MAX_REQUIRED_WORDS = 3;
     private static final int MODEL_CODE_WEIGHT = 3;
+    // The links of two products joined by hand; a product in the search has one link or a few per store
+    private static final int MAX_JOINED_LINKS = 100;
     private static final int BATCH_SIZE = 1000;
 
     // Bulk insert with plain SQL: JPA would save 1 000 000 links one by one.
@@ -98,10 +112,10 @@ public class CatalogServiceImpl implements CatalogService {
 
     // For a tracked link (one that has an offer) the offer's name and price and its product's EAN and model are used
     private static final String ENTRY_COLUMNS = """
-            e.url, e.search_text, e.title, e.price, e.currency, e.in_stock, e.checked_at,
-            e.ean, e.brand, e.model_code, e.image_url, s.code, s.name,
+            e.url, e.search_text, e.title, e.price, e.currency, e.in_stock, e.on_order, e.checked_at,
+            e.ean, e.brand, e.model_code, e.image_url, e.facet_series, e.facet_color, e.facet_memory, e.joined_to_url, s.code, s.name,
             o.product_id, o.title AS offer_title, o.current_price AS offer_price,
-            o.currency AS offer_currency, o.in_stock AS offer_in_stock,
+            o.currency AS offer_currency, o.in_stock AS offer_in_stock, o.on_order AS offer_on_order,
             (SELECT string_agg(pe.ean, ',') FROM product_eans pe WHERE pe.product_id = p.id) AS product_eans,
             p.brand AS product_brand, p.model_code AS product_model_code, p.image_url AS product_image_url
             """;
@@ -140,13 +154,13 @@ public class CatalogServiceImpl implements CatalogService {
         int pageSize = Math.min(Math.max(size, 1), MAX_PAGE_SIZE);
         WordMatch match = wordMatch(words);
         Clause stores = Clause.in("s.code", chosen.getStores());
-        Clause facetFilters = Clause.in("e.facet_brand", chosen.getBrands())
-                .and(Clause.in("e.facet_series", chosen.getSeries()))
+        Clause facetFilters = spellingIn("e.facet_brand", chosen.getBrands())
+                .and(spellingIn("e.facet_series", chosen.getSeries()))
                 .and(Clause.in("e.facet_memory", chosen.getMemory()))
                 .and(Clause.in("e.facet_color", chosen.getColors()));
 
         String sql = "SELECT " + ENTRY_COLUMNS + match.select() + " " + ENTRY_TABLES
-                + " WHERE s.status = 'ACTIVE'" + stores.sql() + facetFilters.sql() + match.where()
+                + SHOWN + stores.sql() + facetFilters.sql() + match.where()
                 + " ORDER BY " + match.orderBy()
                 // One more than a page, to know if there is a next one
                 + " LIMIT " + (pageSize + 1) + " OFFSET " + (long) Math.max(page, 0) * pageSize;
@@ -159,9 +173,14 @@ public class CatalogServiceImpl implements CatalogService {
         // Both go through every link, so the filter counts run at the same time as the results
         CompletableFuture<CatalogFacetsDto> facets = withFacets
                 ? CompletableFuture.supplyAsync(
-                        () -> countFacets(match, stores, Clause.in("e.facet_brand", chosen.getBrands())), facetCounting)
+                        () -> countFacets(match, stores, spellingIn("e.facet_brand", chosen.getBrands()), facetFilters),
+                        facetCounting)
                 : CompletableFuture.completedFuture(null);
-        List<CatalogEntryDto> found = jdbcTemplate.query(sql, this::toDto, params.toArray());
+        List<CatalogEntryDto> found = jdbcTemplate.query(sql, (rs, rowNum) -> {
+            CatalogEntryDto dto = toDto(rs, rowNum);
+            dto.setAccessory(rs.getBoolean("accessory"));
+            return dto;
+        }, params.toArray());
         boolean hasMore = found.size() > pageSize;
         return new CatalogPageDto(hasMore ? found.subList(0, pageSize) : found, hasMore, join(facets));
     }
@@ -202,7 +221,10 @@ public class CatalogServiceImpl implements CatalogService {
 
     private WordMatch wordMatch(List<String> words) {
         List<Object> orderParams = new ArrayList<>();
-        String relevance = accessoriesLast(words, orderParams) + ", " + phraseFirst(words, orderParams)
+        // Also selected, so the search page can tell the accessories from the product itself
+        List<Object> accessoryParams = new ArrayList<>();
+        String accessory = ", " + AccessoryRule.sql(words, accessoryParams) + " AS accessory";
+        String relevance = "accessory, " + phraseFirst(words, orderParams)
                 // Then shorter links: "logitech g502 hero" before "case for logitech g502 hero black ..."
                 + ", length(e.search_text), e.url";
 
@@ -213,7 +235,7 @@ public class CatalogServiceImpl implements CatalogService {
             for (int i = 0; i < words.size(); i++) {
                 where.append(" AND ").append(wordCondition(words, i, whereParams));
             }
-            return new WordMatch("", List.of(), where.toString(), whereParams, relevance, orderParams);
+            return new WordMatch(accessory, accessoryParams, where.toString(), whereParams, relevance, orderParams);
         }
 
         // Longer searches, e.g. a name copied from a store, rarely match word for word.
@@ -243,8 +265,9 @@ public class CatalogServiceImpl implements CatalogService {
         score.append(")");
         nameScore.append(")");
 
-        String select = ", " + score + " AS score";
-        List<Object> selectParams = new ArrayList<>(scoreParams);
+        String select = accessory + ", " + score + " AS score";
+        List<Object> selectParams = new ArrayList<>(accessoryParams);
+        selectParams.addAll(scoreParams);
         String orderBy = "score DESC, " + relevance;
         if (nameFirst) {
             select += ", " + nameScore + " AS name_score";
@@ -256,18 +279,6 @@ public class CatalogServiceImpl implements CatalogService {
         whereParams.add(threshold);
         String where = " AND " + score + " >= ?" + indexFilter(words, weights, threshold, whereParams);
         return new WordMatch(select, selectParams, where, whereParams, orderBy, orderParams);
-    }
-
-    // Accessories after the product itself: links with "za" or "for" before the first search word, like
-    // "kalaf za samsung galaxy buds 4 pro" for "samsung galaxy buds 4 pro". They have all the words too,
-    // often word for word. A search that starts with the accessory ("kalaf za iphone 17") isn't affected,
-    // as its first word comes before the "za".
-    private String accessoriesLast(List<String> words, List<Object> params) {
-        String firstWord = " " + words.get(0);
-        params.add(firstWord);
-        params.add(firstWord);
-        return "(strpos(' ' || e.search_text || ' ', ' za ') BETWEEN 1 AND strpos(' ' || e.search_text, ?)"
-                + " OR strpos(' ' || e.search_text || ' ', ' for ') BETWEEN 1 AND strpos(' ' || e.search_text, ?)) ASC";
     }
 
     // Links with the words next to each other, e.g. "jbl flip 7", before the rest. Short words may be glued to
@@ -328,26 +339,34 @@ public class CatalogServiceImpl implements CatalogService {
     // How many links of the search have each brand, series, memory and color. The other filters are left out,
     // so the counts stay the same while you tick values and a second brand can be added.
     // Only the series follow the chosen brands, so "Razer" shows Razer's series.
-    private CatalogFacetsDto countFacets(WordMatch match, Clause stores, Clause brands) {
+    // The total counts the links with all chosen filters, i.e. all the results of the search.
+    private CatalogFacetsDto countFacets(WordMatch match, Clause stores, Clause brands, Clause allFilters) {
         String brandLinks = brands.sql().isEmpty() ? "count(*)" : "count(*) FILTER (WHERE true" + brands.sql() + ")";
+        String filteredLinks = allFilters.sql().isEmpty() ? "count(*)"
+                : "count(*) FILTER (WHERE true" + allFilters.sql() + ")";
         String sql = """
                 SELECT e.facet_brand, e.facet_series, e.facet_memory, e.facet_color,
                        GROUPING(e.facet_brand) AS by_brand, GROUPING(e.facet_series) AS by_series,
-                       GROUPING(e.facet_memory) AS by_memory, count(*) AS links,
-                """ + brandLinks + """
-                 AS brand_links
+                       GROUPING(e.facet_memory) AS by_memory, GROUPING(e.facet_color) AS by_color, count(*) AS links,
+                """ + brandLinks + " AS brand_links, " + filteredLinks + """
+                 AS filtered_links
                 FROM catalog_entries e
                 JOIN stores s ON s.id = e.store_id
-                WHERE s.status = 'ACTIVE'
-                """ + stores.sql() + match.where() + """
-                 GROUP BY GROUPING SETS ((e.facet_brand), (e.facet_series), (e.facet_memory), (e.facet_color))
+                """ + SHOWN + stores.sql() + match.where() + """
+                 GROUP BY GROUPING SETS ((e.facet_brand), (e.facet_series), (e.facet_memory), (e.facet_color), ())
                 """;
         List<Object> params = new ArrayList<>(brands.params());
+        params.addAll(allFilters.params());
         params.addAll(stores.params());
         params.addAll(match.whereParams());
 
         Map<String, List<CatalogFacetsDto.FacetValue>> byFacet = new LinkedHashMap<>();
+        long[] total = {0};
         jdbcTemplate.query(sql, rs -> {
+            if (rs.getInt("by_brand") + rs.getInt("by_series") + rs.getInt("by_memory") + rs.getInt("by_color") == 4) {
+                total[0] = rs.getLong("filtered_links");
+                return;
+            }
             String facet = rs.getInt("by_brand") == 0 ? "facet_brand"
                     : rs.getInt("by_series") == 0 ? "facet_series"
                     : rs.getInt("by_memory") == 0 ? "facet_memory"
@@ -359,18 +378,55 @@ public class CatalogServiceImpl implements CatalogService {
                         .add(new CatalogFacetsDto.FacetValue(value, links));
             }
         }, params.toArray());
-        return new CatalogFacetsDto(topValues(byFacet.get("facet_brand")), topValues(byFacet.get("facet_series")),
-                topValues(byFacet.get("facet_memory")), topValues(byFacet.get("facet_color")));
+        return new CatalogFacetsDto(topValues(oneSpelling(byFacet.get("facet_brand"))),
+                topValues(oneSpelling(byFacet.get("facet_series"))),
+                topValues(byFacet.get("facet_memory")), topValues(byFacet.get("facet_color")), total[0]);
     }
 
+    // The most links first; with as many, by name, so the list doesn't change order from search to search
     private List<CatalogFacetsDto.FacetValue> topValues(List<CatalogFacetsDto.FacetValue> values) {
         if (values == null) {
             return List.of();
         }
         return values.stream()
-                .sorted(Comparator.comparingLong(CatalogFacetsDto.FacetValue::getCount).reversed())
+                .sorted(Comparator.comparingLong(CatalogFacetsDto.FacetValue::getCount).reversed()
+                        .thenComparing(CatalogFacetsDto.FacetValue::getValue, String.CASE_INSENSITIVE_ORDER))
                 .limit(MAX_FACET_VALUES)
                 .toList();
+    }
+
+    // "Cellular-Line" and "Cellularline" are one brand: the links of the store pages decide the spelling, and
+    // links read at different times can have different ones. Shown once, as most of the links write it.
+    // Choosing it finds all spellings, see spellingIn.
+    private List<CatalogFacetsDto.FacetValue> oneSpelling(List<CatalogFacetsDto.FacetValue> values) {
+        if (values == null) {
+            return null;
+        }
+        Map<String, List<CatalogFacetsDto.FacetValue>> bySpelling = new LinkedHashMap<>();
+        for (CatalogFacetsDto.FacetValue value : values) {
+            bySpelling.computeIfAbsent(spellingKey(value.getValue()), key -> new ArrayList<>()).add(value);
+        }
+        return bySpelling.values().stream()
+                .map(same -> new CatalogFacetsDto.FacetValue(
+                        same.stream().max(Comparator.comparingLong(CatalogFacetsDto.FacetValue::getCount)).orElseThrow()
+                                .getValue(),
+                        same.stream().mapToLong(CatalogFacetsDto.FacetValue::getCount).sum()))
+                .toList();
+    }
+
+    // "Cellular-Line Ice" -> "cellularlineice"; the same as SPELLING_KEY_SQL does in the database
+    private static String spellingKey(String value) {
+        return value.toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]", "");
+    }
+
+    static final String SPELLING_KEY_SQL = "lower(regexp_replace(%s, '[^[:alnum:]]', '', 'g'))";
+
+    // A chosen brand or series finds every spelling of it, see oneSpelling
+    private static Clause spellingIn(String column, List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return Clause.in(column, values);
+        }
+        return Clause.in(SPELLING_KEY_SQL.formatted(column), values.stream().map(CatalogServiceImpl::spellingKey).toList());
     }
 
     // Short words like the "7" in "flip 7" must stand alone ("flip 7", "256gb") or be glued to the word
@@ -411,6 +467,8 @@ public class CatalogServiceImpl implements CatalogService {
         ScrapedProduct product = null;
         try {
             product = scraperService.scrape(url);
+        } catch (PageNotFoundException e) {
+            entry.setGone(true);
         } catch (ScrapingException e) {
             // E.g. a removed product. Remembered too, so we don't open the page on every search.
             log.debug("Could not check {}: {}", url, e.getMessage());
@@ -423,25 +481,28 @@ public class CatalogServiceImpl implements CatalogService {
             eans = product.getEans().isEmpty() ? null
                     : String.join(",", product.getEans().stream().limit(MAX_EANS).toList());
             entry.setName(product.getTitle());
-            setPrice(entry, product.getPrice(), product.getCurrency(), product.getInStock());
+            setPrice(entry, product.getPrice(), product.getCurrency(), product.getInStock(), product.isOnOrder());
             setIdentity(entry, eans, TextUtils.truncate(product.getBrand(), 100), modelCode,
                     TextUtils.truncate(product.getImageUrl(), 1000));
         } else {
-            setPrice(entry, null, null, null);
+            setPrice(entry, null, null, null, false);
         }
 
         // Plain UPDATE, so we don't overwrite last_seen_at if the catalog is being updated at the same time.
         // COALESCE keeps what we already knew when the page could not be read this time.
         jdbcTemplate.update("""
                         UPDATE catalog_entries
-                        SET title = COALESCE(?, title), price = ?, currency = ?, in_stock = ?, checked_at = ?,
+                        SET title = COALESCE(?, title), price = ?, currency = ?, in_stock = ?, on_order = ?,
+                            checked_at = ?,
                             ean = COALESCE(?, ean), brand = COALESCE(?, brand),
-                            model_code = COALESCE(?, model_code), image_url = COALESCE(?, image_url)
+                            model_code = COALESCE(?, model_code), image_url = COALESCE(?, image_url), gone_at = ?
                         WHERE url = ?
                         """,
                 product == null ? null : TextUtils.truncate(product.getTitle(), 500),
-                entry.getPrice(), entry.getCurrency(), entry.getInStock(), Timestamp.valueOf(LocalDateTime.now()),
-                eans, entry.getBrand(), modelCode, entry.getImageUrl(), url);
+                entry.getPrice(), entry.getCurrency(), entry.getInStock(), entry.isOnOrder(),
+                Timestamp.valueOf(LocalDateTime.now()),
+                eans, entry.getBrand(), modelCode, entry.getImageUrl(),
+                entry.isGone() ? Timestamp.valueOf(LocalDateTime.now()) : null, url);
         return entry;
     }
 
@@ -451,12 +512,16 @@ public class CatalogServiceImpl implements CatalogService {
         dto.setStoreName(rs.getString("name"));
         dto.setUrl(rs.getString("url"));
         dto.setProductId(rs.getObject("product_id", Long.class));
+        dto.setSeries(rs.getString("facet_series"));
+        dto.setColor(rs.getString("facet_color"));
+        dto.setMemory(rs.getString("facet_memory"));
+        dto.setJoinedToUrl(rs.getString("joined_to_url"));
 
         // A tracked link: the offer is refreshed every few hours anyway
         if (dto.getProductId() != null) {
             dto.setName(rs.getString("offer_title"));
             setPrice(dto, rs.getBigDecimal("offer_price"), rs.getString("offer_currency"),
-                    rs.getObject("offer_in_stock", Boolean.class));
+                    rs.getObject("offer_in_stock", Boolean.class), rs.getBoolean("offer_on_order"));
             setIdentity(dto, rs.getString("product_eans"), rs.getString("product_brand"),
                     rs.getString("product_model_code"), rs.getString("product_image_url"));
             return dto;
@@ -469,16 +534,103 @@ public class CatalogServiceImpl implements CatalogService {
         Timestamp checkedAt = rs.getTimestamp("checked_at");
         BigDecimal price = rs.getBigDecimal("price");
         if (checkedAt != null && isPriceFresh(checkedAt.toLocalDateTime(), price)) {
-            setPrice(dto, price, rs.getString("currency"), rs.getObject("in_stock", Boolean.class));
+            setPrice(dto, price, rs.getString("currency"), rs.getObject("in_stock", Boolean.class),
+                    rs.getBoolean("on_order"));
         }
         return dto;
     }
 
-    private void setPrice(CatalogEntryDto dto, BigDecimal price, String currency, Boolean inStock) {
+    private void setPrice(CatalogEntryDto dto, BigDecimal price, String currency, Boolean inStock,
+                          boolean onOrder) {
         dto.setPrice(price);
         dto.setCurrency(currency);
         dto.setInStock(inStock);
+        dto.setOnOrder(onOrder);
         dto.setChecked(true);
+    }
+
+    @Override
+    @Transactional
+    public String join(List<String> urls, List<String> targetUrls) {
+        if (urls == null || urls.isEmpty() || targetUrls == null || targetUrls.isEmpty()
+                || urls.size() + targetUrls.size() > MAX_JOINED_LINKS) {
+            throw new IllegalArgumentException("Give the links of both products, up to " + MAX_JOINED_LINKS);
+        }
+        List<String> all = new ArrayList<>(urls);
+        all.addAll(targetUrls);
+        // Tracked products become one: the product of the links they are put with stays
+        List<Long> products = jdbcTemplate.queryForList(
+                "SELECT DISTINCT product_id FROM offers WHERE product_id IS NOT NULL" + Clause.in("url", all).sql()
+                        + " ORDER BY product_id", Long.class, all.toArray());
+        if (products.size() > 1) {
+            Long kept = jdbcTemplate.queryForList(
+                    "SELECT product_id FROM offers WHERE product_id IS NOT NULL" + Clause.in("url", targetUrls).sql()
+                            + " ORDER BY id LIMIT 1", Long.class, targetUrls.toArray())
+                    .stream().findFirst().orElse(products.get(0));
+            products.stream().filter(product -> !product.equals(kept)).forEach(product -> mergeProduct(product, kept));
+        }
+
+        // All links of a product point to the same link, so a link that was itself moved passes on where it points
+        Map<String, String> joinedTo = new LinkedHashMap<>();
+        jdbcTemplate.query("SELECT url, joined_to_url FROM catalog_entries WHERE true" + Clause.in("url", targetUrls).sql(),
+                rs -> {
+                    joinedTo.put(rs.getString("url"), rs.getString("joined_to_url"));
+                }, targetUrls.toArray());
+        String target = targetUrls.stream()
+                .filter(url -> joinedTo.containsKey(url) && joinedTo.get(url) == null)
+                .findFirst()
+                .or(() -> joinedTo.values().stream().filter(Objects::nonNull).findFirst())
+                .orElseThrow(() -> new ResourceNotFoundException("These links are not in the catalog"));
+        if (urls.contains(target)) {
+            throw new IllegalArgumentException("These links are already one product");
+        }
+
+        List<Object> params = new ArrayList<>();
+        params.add(target);
+        params.addAll(urls);
+        jdbcTemplate.update("UPDATE catalog_entries SET joined_to_url = ? WHERE true" + Clause.in("url", urls).sql(),
+                params.toArray());
+        return target;
+    }
+
+    // Moves everything of one tracked product to another: its offers with their price history, its barcodes
+    // and the favorites of its users. It can't be taken back, the first product is gone afterwards.
+    private void mergeProduct(Long from, Long to) {
+        jdbcTemplate.update("UPDATE offers SET product_id = ? WHERE product_id = ?", to, from);
+        jdbcTemplate.update("""
+                INSERT INTO product_eans (product_id, ean)
+                SELECT ?, ean FROM product_eans WHERE product_id = ?
+                ON CONFLICT DO NOTHING
+                """, to, from);
+        jdbcTemplate.update("DELETE FROM product_eans WHERE product_id = ?", from);
+        // A user with both in the favorites keeps the one of the product that stays
+        jdbcTemplate.update("""
+                DELETE FROM watchlist_items gone
+                WHERE gone.product_id = ? AND EXISTS (
+                    SELECT 1 FROM watchlist_items kept WHERE kept.product_id = ? AND kept.user_id = gone.user_id)
+                """, from, to);
+        jdbcTemplate.update("UPDATE watchlist_items SET product_id = ? WHERE product_id = ?", to, from);
+
+        // What the product that stays doesn't know yet. The barcode is unique, so the old row goes first.
+        Map<String, Object> old = jdbcTemplate.queryForMap(
+                "SELECT ean, brand, model_code, image_url FROM products WHERE id = ?", from);
+        jdbcTemplate.update("DELETE FROM products WHERE id = ?", from);
+        jdbcTemplate.update("""
+                UPDATE products
+                SET ean = COALESCE(ean, ?), brand = COALESCE(brand, ?), model_code = COALESCE(model_code, ?),
+                    image_url = COALESCE(image_url, ?)
+                WHERE id = ?
+                """, old.get("ean"), old.get("brand"), old.get("model_code"), old.get("image_url"), to);
+        log.info("Product {} was joined to product {}", from, to);
+    }
+
+    @Override
+    public void separate(List<String> urls) {
+        if (urls == null || urls.isEmpty() || urls.size() > MAX_JOINED_LINKS) {
+            throw new IllegalArgumentException("Give between 1 and " + MAX_JOINED_LINKS + " links");
+        }
+        jdbcTemplate.update("UPDATE catalog_entries SET joined_to_url = NULL WHERE true" + Clause.in("url", urls).sql(),
+                urls.toArray());
     }
 
     // eans: comma-separated, as kept in the database
@@ -546,25 +698,40 @@ public class CatalogServiceImpl implements CatalogService {
         FacetExtractor facets = FacetExtractor.load(brandsFromPages());
         long lastId = 0;
         int done = 0;
+        int changed = 0;
         while (true) {
-            List<Object[]> rows = jdbcTemplate.query(
-                    "SELECT id, search_text FROM catalog_entries WHERE id > ? ORDER BY id LIMIT " + BATCH_SIZE * 5,
+            // [brand, series, memory, color, id, true if any of them is new]
+            List<Object[]> rows = jdbcTemplate.query("""
+                            SELECT id, search_text, facet_brand, facet_series, facet_memory, facet_color
+                            FROM catalog_entries WHERE id > ? ORDER BY id LIMIT\s""" + BATCH_SIZE * 5,
                     (rs, rowNum) -> {
                         FacetExtractor.Facets found = facets.extract(rs.getString("search_text"));
+                        boolean isNew = !Objects.equals(found.brand(), rs.getString("facet_brand"))
+                                || !Objects.equals(found.series(), rs.getString("facet_series"))
+                                || !Objects.equals(found.memory(), rs.getString("facet_memory"))
+                                || !Objects.equals(found.color(), rs.getString("facet_color"));
                         return new Object[]{found.brand(), found.series(), found.memory(), found.color(),
-                                rs.getLong("id")};
+                                rs.getLong("id"), isNew};
                     }, lastId);
             if (rows.isEmpty()) {
                 break;
             }
-            jdbcTemplate.batchUpdate("""
-                    UPDATE catalog_entries SET facet_brand = ?, facet_series = ?, facet_memory = ?, facet_color = ?
-                    WHERE id = ?
-                    """, rows);
+            // Only the links that read differently now: writing all of them again would double the table
+            List<Object[]> updates = rows.stream()
+                    .filter(row -> (Boolean) row[5])
+                    .map(row -> Arrays.copyOf(row, 5))
+                    .toList();
+            if (!updates.isEmpty()) {
+                jdbcTemplate.batchUpdate("""
+                        UPDATE catalog_entries SET facet_brand = ?, facet_series = ?, facet_memory = ?, facet_color = ?
+                        WHERE id = ?
+                        """, updates);
+            }
             lastId = (Long) rows.get(rows.size() - 1)[4];
             done += rows.size();
+            changed += updates.size();
         }
-        log.info("Filters read again for {} catalog links", done);
+        log.info("Filters read again for {} catalog links, {} changed", done, changed);
     }
 
     private void updateCatalogs(boolean force) {
@@ -586,8 +753,12 @@ public class CatalogServiceImpl implements CatalogService {
     // Brands as product pages write them, to spell the brand filter right
     private List<String> brandsFromPages() {
         return jdbcTemplate.queryForList("""
-                SELECT DISTINCT brand FROM catalog_entries WHERE brand IS NOT NULL
-                UNION SELECT DISTINCT brand FROM products WHERE brand IS NOT NULL
+                SELECT brand FROM (
+                    SELECT brand, count(*) AS links FROM catalog_entries WHERE brand IS NOT NULL GROUP BY brand
+                    UNION ALL SELECT brand, count(*) FROM products WHERE brand IS NOT NULL GROUP BY brand
+                ) spellings
+                GROUP BY brand
+                ORDER BY sum(links), brand
                 """, String.class);
     }
 
@@ -595,32 +766,82 @@ public class CatalogServiceImpl implements CatalogService {
         LocalDateTime startedAt = LocalDateTime.now();
         long delay = store.getCrawlDelayMs();
 
-        String root = pageFetcher.fetchText(adapter.sitemapUrl(), delay);
-        boolean robotsTxt = adapter.sitemapUrl().endsWith("/robots.txt");
         int saved = 0;
-        if (robotsTxt || root.contains("<sitemapindex")) {
-            List<String> sitemaps = robotsTxt ? robotsTxtSitemaps(root) : locs(root);
-            for (String sitemap : sitemaps) {
-                if (adapter.isProductSitemap(sitemap)) {
-                    saved += saveLinks(store, adapter, pageFetcher.fetchText(sitemap, delay), startedAt, facets);
-                }
-            }
+        boolean complete = true;
+        if (adapter.sitemapUrl() == null) {
+            CategoryCrawl crawl = crawlCategories(store, adapter, delay);
+            saved = saveLinks(store, crawl.links(), startedAt, facets);
+            complete = crawl.failedPages() == 0;
         } else {
-            saved = saveLinks(store, adapter, root, startedAt, facets);
+            String root = pageFetcher.fetchText(adapter.sitemapUrl(), delay);
+            boolean robotsTxt = adapter.sitemapUrl().endsWith("/robots.txt");
+            if (robotsTxt || root.contains("<sitemapindex")) {
+                List<String> sitemaps = robotsTxt ? robotsTxtSitemaps(root) : locs(root);
+                for (String sitemap : sitemaps) {
+                    if (adapter.isProductSitemap(sitemap)) {
+                        saved += saveLinks(store, sitemapLinks(adapter, pageFetcher.fetchText(sitemap, delay)),
+                                startedAt, facets);
+                    }
+                }
+            } else {
+                saved = saveLinks(store, sitemapLinks(adapter, root), startedAt, facets);
+            }
         }
 
-        // Only reached if every sitemap was downloaded: links we didn't see are no longer sold
-        jdbcTemplate.update("DELETE FROM catalog_entries WHERE store_id = ? AND last_seen_at < ?",
-                store.getId(), Timestamp.valueOf(startedAt));
+        // Only if every page was downloaded: links we didn't see are no longer sold
+        if (complete) {
+            jdbcTemplate.update("DELETE FROM catalog_entries WHERE store_id = ? AND last_seen_at < ?",
+                    store.getId(), Timestamp.valueOf(startedAt));
+        }
         // Plain UPDATE, so we don't overwrite fields the price refresh may be changing at the same time
         jdbcTemplate.update("UPDATE stores SET catalog_updated_at = ? WHERE id = ?",
                 Timestamp.valueOf(LocalDateTime.now()), store.getId());
         return saved;
     }
 
-    private int saveLinks(Store store, StoreAdapter adapter, String sitemapXml, LocalDateTime seenAt,
-                          FacetExtractor facets) {
-        // link -> product name or null. A map, because one SQL batch may not touch the same link twice.
+    private record CategoryCrawl(Map<String, String> links, int failedPages) {
+    }
+
+    // For stores without a usable sitemap: reads every page of every category.
+    // A page that can't be read is skipped, and then no old links are removed.
+    private CategoryCrawl crawlCategories(Store store, StoreAdapter adapter, long delay) {
+        List<String> categories = adapter.categoryUrls(pageFetcher.fetch(adapter.categoriesUrl(), delay));
+        Map<String, String> links = new LinkedHashMap<>();
+        Set<String> products = new HashSet<>();
+        int failed = 0;
+        for (int i = 0; i < categories.size(); i++) {
+            String category = categories.get(i);
+            List<String> pages = new ArrayList<>(List.of(category));
+            for (int page = 0; page < pages.size(); page++) {
+                try {
+                    Document document = pageFetcher.fetch(pages.get(page), delay);
+                    if (page == 0) {
+                        pages.addAll(adapter.morePages(category, document));
+                    }
+                    adapter.productLinks(document).forEach((url, name) -> {
+                        if (url.length() <= 1000 && products.add(adapter.productKey(url))) {
+                            links.put(url, TextUtils.truncate(name, 500));
+                        }
+                    });
+                } catch (ScrapingException e) {
+                    failed++;
+                    log.warn("Could not read a category page of {}: {}", store.getName(), e.getMessage());
+                }
+            }
+            if ((i + 1) % 50 == 0) {
+                log.info("Catalog of {}: {} of {} categories read, {} products", store.getName(), i + 1,
+                        categories.size(), links.size());
+            }
+        }
+        if (links.isEmpty()) {
+            // The store changed its pages; keep the links we have
+            throw new ScrapingException("No products found in the categories of " + store.getName());
+        }
+        return new CategoryCrawl(links, failed);
+    }
+
+    // link -> product name or null. A map, because one SQL batch may not touch the same link twice.
+    private Map<String, String> sitemapLinks(StoreAdapter adapter, String sitemapXml) {
         Map<String, String> links = new LinkedHashMap<>();
         Matcher entries = URL_ENTRY.matcher(sitemapXml);
         while (entries.find()) {
@@ -634,7 +855,10 @@ public class CatalogServiceImpl implements CatalogService {
                 links.putIfAbsent(url, imageTitle(entry));
             }
         }
+        return links;
+    }
 
+    private int saveLinks(Store store, Map<String, String> links, LocalDateTime seenAt, FacetExtractor facets) {
         Timestamp seen = Timestamp.valueOf(seenAt);
         List<Object[]> rows = links.entrySet().stream()
                 .map(link -> {
@@ -662,7 +886,7 @@ public class CatalogServiceImpl implements CatalogService {
         if (store.getStatus() != StoreStatus.ACTIVE) {
             return Optional.empty();
         }
-        return storeAdapters.find(store.getCode()).filter(adapter -> adapter.sitemapUrl() != null);
+        return storeAdapters.find(store.getCode()).filter(adapter -> adapter.sitemapUrl() != null || adapter.categoriesUrl() != null);
     }
 
     private boolean isFresh(Store store) {

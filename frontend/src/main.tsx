@@ -9,6 +9,7 @@ import "react-toastify/dist/ReactToastify.css";
 
 import App from "./App";
 import AuthProvider from "./auth/AuthProvider";
+import FavoritesProvider from "./favorites/FavoritesProvider";
 import theme from "./theme";
 import "./index.css";
 
@@ -18,7 +19,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <CssBaseline />
             <BrowserRouter>
                 <AuthProvider>
-                    <App />
+                    <FavoritesProvider>
+                        <App />
+                    </FavoritesProvider>
                 </AuthProvider>
             </BrowserRouter>
             <ToastContainer
