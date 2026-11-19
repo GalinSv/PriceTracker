@@ -5,6 +5,8 @@ import com.pricetracker.dto.CatalogFiltersDto;
 import com.pricetracker.dto.CatalogPageDto;
 import com.pricetracker.dto.CatalogStatusDto;
 
+import java.util.List;
+
 public interface CatalogService {
     // filters may be null. page starts from 0; size is capped at 300.
     // withFacets: also count the brands, series, memory and colors of all results (one more query).
@@ -12,6 +14,13 @@ public interface CatalogService {
 
     // Opens the store page of a search result and remembers its name, price and stock
     CatalogEntryDto check(String url);
+
+    // An admin says two products of the search are one: the links in urls go to the product of targetUrls.
+    // Returns the link they were put with. Remembered for every later search.
+    String join(List<String> urls, List<String> targetUrls);
+
+    // Takes back a join for these links
+    void separate(List<String> urls);
 
     CatalogStatusDto getStatus();
 
