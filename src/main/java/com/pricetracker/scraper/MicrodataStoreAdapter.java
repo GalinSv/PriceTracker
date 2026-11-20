@@ -32,6 +32,7 @@ public abstract class MicrodataStoreAdapter implements StoreAdapter {
         product.setPrice(PriceParser.parse(value(property(offerItem, "price"))));
         product.setCurrency(value(property(offerItem, "priceCurrency")));
         product.setInStock(Availability.isInStock(value(property(offerItem, "availability"))));
+        product.setOnOrder(Availability.isOnOrder(value(property(offerItem, "availability"))));
         String ogImage = HtmlUtils.meta(page, "og:image");
         product.setImageUrl(ogImage != null ? ogImage : value(property(item, "image")));
 

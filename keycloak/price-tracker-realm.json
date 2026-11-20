@@ -52,7 +52,7 @@
       "lastName": "Price Tracker",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "UG6W8owHV5RYTPv1", "temporary": false }],
+      "credentials": [{ "type": "password", "value": "1234", "temporary": false }],
       "realmRoles": ["default-roles-price-tracker", "admin"]
     },
     {

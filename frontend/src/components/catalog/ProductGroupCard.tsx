@@ -1,28 +1,20 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useRef, useState } from "react";
 
 import {
     Box,
     Button,
     Card,
     CardActionArea,
-    Chip,
     CircularProgress,
-    IconButton,
+    Collapse,
     LinearProgress,
-    Table,
-    TableBody,
-    TableCell,
-    TableContainer,
-    TableRow,
     Tooltip,
     Typography,
 } from "@mui/material";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import OpenInNewIcon from "@mui/icons-material/OpenInNew";
-import VisibilityIcon from "@mui/icons-material/Visibility";
 
 import type { CatalogEntry } from "../../types/api";
 import { isAvailable } from "../../utils/catalogGroups";
@@ -30,40 +22,45 @@ import type { ProductGroup } from "../../utils/catalogGroups";
 import { formatPrice } from "../../utils/format";
 import FavoriteButton from "../favorites/FavoriteButton";
 import ProductImage from "../product/ProductImage";
+import CatalogOfferTable from "./CatalogOfferTable";
+
+// How an admin joins two products: drags one by its handle and drops it on the other.
+// On a touch screen, where nothing can be dragged: a tap on the handle picks the product, then "Събери тук"
+// on the other one.
+export type Joining = {
+    // Another product is being dragged or was picked, and can be put with this one
+    canDrop: boolean;
+    // This product was picked with a tap on its handle
+    picked: boolean;
+    onPick: (group: ProductGroup) => void;
+    onDragStart: (group: ProductGroup) => void;
+    onDragEnd: () => void;
+    onDrop: (target: ProductGroup) => void;
+    // Takes a store that was moved here out again
+    onSeparate: (group: ProductGroup, entry: CatalogEntry) => void;
+};
 
 type Props = {
     group: ProductGroup;
-    importingUrl: string | null;
-    onTrack: (entry: CatalogEntry) => void;
     // Opens the product page with all its stores
     onOpen: (group: ProductGroup) => void;
     opening: boolean;
     // Makes the block's links one product and gives its id
     toProduct: (group: ProductGroup) => Promise<number>;
+    // null for everyone but admins
+    joining: Joining | null;
+    // The stores are shown; closed until the visitor opens them
+    expanded: boolean;
+    onToggle: (group: ProductGroup) => void;
 };
 
-function StockStatus({ entry }: { entry: CatalogEntry }) {
-    if (entry.price == null) {
-        return (
-            <Typography variant="body2" color="text.secondary">
-                Няма цена
-            </Typography>
-        );
-    }
-    const inStock = entry.inStock !== false;
-    return (
-        <Chip
-            size="small"
-            label={inStock ? "В наличност" : "Изчерпан"}
-            color={inStock ? "success" : "default"}
-            variant={inStock ? "filled" : "outlined"}
-        />
-    );
-}
-
 // A search result shown like the product page: the product on top, its stores below, cheapest first
-function ProductGroupCard({ group, importingUrl, onTrack, onOpen, opening, toProduct }: Props) {
+function ProductGroupCard({ group, onOpen, opening, toProduct, joining, expanded, onToggle }: Props) {
     const [showUnavailable, setShowUnavailable] = useState(false);
+    const card = useRef<HTMLDivElement>(null);
+    // The dragged product is over this one
+    const [dropHover, setDropHover] = useState(false);
+    const canDrop = joining?.canDrop ?? false;
 
     // One row per store: some stores list the same product under several links.
     // The entries are in stock and cheapest first, so the first link of a store is its best offer.
@@ -79,7 +76,66 @@ function ProductGroupCard({ group, importingUrl, onTrack, onOpen, opening, toPro
     const shownRows = available.length > 0 && !showUnavailable ? available : rows;
 
     return (
-        <Card sx={{ position: "relative" }}>
+        <Card
+            ref={card}
+            sx={{
+                position: "relative",
+                ...(joining?.picked && { outline: "2px solid", outlineColor: "primary.main" }),
+                ...(canDrop && {
+                    outline: "2px dashed",
+                    outlineColor: dropHover ? "primary.main" : "divider",
+                    ...(dropHover && { bgcolor: "rgba(15,110,86,0.05)" }),
+                }),
+            }}
+            onDragOver={(event) => {
+                if (!canDrop) return;
+                // Without this the browser doesn't allow a drop here
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                setDropHover(true);
+            }}
+            onDragLeave={(event) => {
+                // Moving over the card's own rows and buttons also fires this
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropHover(false);
+            }}
+            onDrop={(event) => {
+                if (!canDrop) return;
+                event.preventDefault();
+                setDropHover(false);
+                joining?.onDrop(group);
+            }}
+        >
+            {joining && (
+                <Tooltip title="Хвани и пусни върху друг продукт, за да ги събереш в един. Или натисни тук и после „Събери тук“ на другия.">
+                    <Box
+                        draggable
+                        onClick={() => joining.onPick(group)}
+                        onDragStart={(event) => {
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData("text/plain", group.name);
+                            // The whole card follows the mouse, not only the handle
+                            if (card.current) event.dataTransfer.setDragImage(card.current, 16, 16);
+                            joining.onDragStart(group);
+                        }}
+                        onDragEnd={joining.onDragEnd}
+                        sx={{
+                            position: "absolute",
+                            top: 4,
+                            left: 4,
+                            zIndex: 1,
+                            display: "flex",
+                            p: 0.25,
+                            borderRadius: 1,
+                            color: "text.secondary",
+                            bgcolor: "background.paper",
+                            cursor: "grab",
+                            "&:hover": { color: "primary.main" },
+                        }}
+                    >
+                        <DragIndicatorIcon fontSize="small" />
+                    </Box>
+                </Tooltip>
+            )}
             {/* Outside the clickable header: a button can't be inside another button */}
             <Box sx={{ position: "absolute", top: 8, right: 8, zIndex: 1 }}>
                 <FavoriteButton productId={group.productId} resolveProductId={() => toProduct(group)} />
@@ -122,93 +178,72 @@ function ProductGroupCard({ group, importingUrl, onTrack, onOpen, opening, toPro
             </CardActionArea>
             {opening && <LinearProgress />}
 
-            <TableContainer>
-                <Table size="small">
-                    <TableBody>
-                        {shownRows.map((entry) => {
-                            const isLowest = isAvailable(entry) && entry.price === group.lowestPrice;
-                            return (
-                                <TableRow
-                                    key={entry.url}
-                                    sx={{
-                                        ...(isLowest && { bgcolor: "rgba(15,110,86,0.05)" }),
-                                        "&:last-child td": { borderBottom: 0 },
-                                    }}
-                                >
-                                    <TableCell sx={{ fontWeight: 700, whiteSpace: "nowrap" }}>{entry.storeName}</TableCell>
-                                    {/* On narrow screens there is no room; the product name is above anyway */}
-                                    <TableCell sx={{ maxWidth: 360, display: { xs: "none", md: "table-cell" } }}>
-                                        <Typography variant="body2" noWrap title={entry.name}>
-                                            {entry.name}
-                                        </Typography>
-                                    </TableCell>
-                                    <TableCell>
-                                        <StockStatus entry={entry} />
-                                    </TableCell>
-                                    <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
-                                        <Typography
-                                            sx={{ fontWeight: 700 }}
-                                            color={isLowest ? "primary.main" : "text.primary"}
-                                        >
-                                            {formatPrice(entry.price, entry.currency ?? undefined)}
-                                        </Typography>
-                                    </TableCell>
-                                    <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
-                                        <Tooltip title="Отвори в магазина">
-                                            <IconButton
-                                                component="a"
-                                                href={entry.url}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                size="small"
-                                                sx={{ mr: 1 }}
-                                            >
-                                                <OpenInNewIcon fontSize="small" />
-                                            </IconButton>
-                                        </Tooltip>
-                                        {entry.productId != null ? (
-                                            <Button
-                                                component={Link}
-                                                to={`/products/${entry.productId}`}
-                                                variant="outlined"
-                                                size="small"
-                                                sx={{ minWidth: 100 }}
-                                            >
-                                                Виж цените
-                                            </Button>
-                                        ) : (
-                                            <Button
-                                                variant="contained"
-                                                size="small"
-                                                startIcon={<VisibilityIcon />}
-                                                loading={importingUrl === entry.url}
-                                                disabled={importingUrl != null && importingUrl !== entry.url}
-                                                onClick={() => onTrack(entry)}
-                                                sx={{ minWidth: 100 }}
-                                            >
-                                                Следи
-                                            </Button>
-                                        )}
-                                    </TableCell>
-                                </TableRow>
-                            );
-                        })}
-                    </TableBody>
-                </Table>
-            </TableContainer>
-            {unavailable.length > 0 && (
-                <Box sx={{ px: 1, py: 0.5, borderTop: 1, borderColor: "divider" }}>
+            <Box
+                sx={{
+                    px: 1,
+                    py: 0.5,
+                    borderTop: 1,
+                    borderColor: "divider",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                }}
+            >
+                <Button
+                    size="small"
+                    endIcon={expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                    onClick={() => onToggle(group)}
+                >
+                    {expanded ? "Скрий магазините" : `Виж магазините (${shownRows.length})`}
+                </Button>
+                <Box sx={{ display: "flex", gap: 1 }}>
+                    {canDrop && (
+                        <Button size="small" variant="contained" onClick={() => joining?.onDrop(group)}>
+                            Събери тук
+                        </Button>
+                    )}
+                    {/* On a phone the header has no room for it */}
                     <Button
                         size="small"
-                        endIcon={showUnavailable ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-                        onClick={() => setShowUnavailable((shown) => !shown)}
+                        endIcon={<ChevronRightIcon />}
+                        onClick={() => onOpen(group)}
+                        disabled={opening}
+                        sx={{ display: { xs: "inline-flex", sm: "none" } }}
                     >
-                        {showUnavailable
-                            ? "Скрий магазините без наличност"
-                            : `Още ${unavailable.length} ${unavailable.length === 1 ? "магазин" : "магазина"} без наличност`}
+                        Всички цени
                     </Button>
                 </Box>
-            )}
+            </Box>
+            <Collapse in={expanded} unmountOnExit>
+                <CatalogOfferTable
+                    offers={shownRows.map((entry) => ({ entry, color: null }))}
+                    lowestPrice={group.lowestPrice}
+                    actions={(entry) =>
+                        joining &&
+                        entry.joinedToUrl &&
+                        entry.productId == null && (
+                            <Tooltip title="Този магазин е добавен тук на ръка. Върни го като отделен продукт">
+                                <Button size="small" onClick={() => joining.onSeparate(group, entry)}>
+                                    Отдели
+                                </Button>
+                            </Tooltip>
+                        )
+                    }
+                />
+                {unavailable.length > 0 && (
+                    <Box sx={{ px: 1, py: 0.5, borderTop: 1, borderColor: "divider" }}>
+                        <Button
+                            size="small"
+                            endIcon={showUnavailable ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                            onClick={() => setShowUnavailable((shown) => !shown)}
+                        >
+                            {showUnavailable
+                                ? "Скрий магазините без наличност"
+                                : `Още ${unavailable.length} ${unavailable.length === 1 ? "магазин" : "магазина"} без наличност`}
+                        </Button>
+                    </Box>
+                )}
+            </Collapse>
         </Card>
     );
 }
